@@ -1,0 +1,26 @@
+[package]
+name = "cse403_distributed_hash_table"
+version = "0.1.0"
+authors = ["Evan Hruskar <hruskar.evan@gmail.com>"]
+edition = "2018"
+
+# See more keys and their definitions at https://doc.rust-lang.org/cargo/reference/manifest.html
+
+# See: https://www.reddit.com/r/rust/comments/abs0do/rust_newbie_question_about_multiple_binaries/
+#[lib]
+#name = "protocol"
+#path = "src/lib.rs"
+
+[dependencies]
+config = "0.10.1"
+serde = { version = "1.0", features = ["derive"] }
+serde_json = "1.0"  # TODO: Switch to COBR ?
+
+[[bin]]
+name = "client"
+path = "src/client/client.rs"
+
+[[bin]]
+name = "server"
+path = "src/server/server.rs"
+
