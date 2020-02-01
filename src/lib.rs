@@ -3,9 +3,13 @@
 pub mod protocol {
     use serde::{Serialize, Deserialize};
 
+    pub type KeyType = i32;
+    pub type ValueType = String;
+
     #[derive(Serialize, Deserialize, Debug)]
     pub enum Command {
-        Set(u32, String),
-        Get(u32),
+        Put(KeyType, ValueType),
+        Get(KeyType),
     }
+
 }
