@@ -7,6 +7,7 @@ edition = "2018"
 # See more keys and their definitions at https://doc.rust-lang.org/cargo/reference/manifest.html
 
 # See: https://www.reddit.com/r/rust/comments/abs0do/rust_newbie_question_about_multiple_binaries/
+# https://doc.rust-lang.org/cargo/reference/manifest.html#the-project-layout
 #[lib]
 #name = "protocol"
 #path = "src/lib.rs"
