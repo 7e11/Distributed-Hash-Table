@@ -1,4 +1,4 @@
-use std::net::TcpStream;
+use std::net::{TcpStream, TcpListener};
 use serde_json::{to_writer, from_reader};
 use rand::distributions::{Bernoulli, Distribution};
 use rand::{thread_rng, Rng};
@@ -9,18 +9,20 @@ use config::ConfigError;
 use std::path::Path;
 use cse403_distributed_hash_table::protocol::CommandResponse::{PutAck, GetAck, NegAck};
 use std::thread;
+use cse403_distributed_hash_table::settings::parse_ips;
 
 
 fn main() {
     // Parse settings
     let (client_ips, server_ips, num_ops, key_range) = parse_settings()
         .expect("Unable to parse settings");
-    println!("Starting barrier");
+    let listener = TcpListener::bind(("0.0.0.0", 40481))
+        .expect("Unable to bind listener");
     // Consume only the client_ips vector, clone server_ips.
     let barrier_ips = client_ips.into_iter().chain(server_ips.clone().into_iter()).collect();
-    barrier(barrier_ips, 40481);
+    barrier(barrier_ips, &listener);
+    println!("{:?}", server_ips);
     println!("Starting application");
-//    application_listener()
 
     let (mut put_success, mut put_fail, mut get_success, mut get_fail, mut neg_ack) = (0, 0, 0, 0, 0);
     let do_put_dist = Bernoulli::from_ratio(4, 10).unwrap();
@@ -47,19 +49,21 @@ fn main() {
             }
         }
         // Think Time
-        thread::sleep(Duration::from_micros(thread_rng().gen_range(0, 1_000) as u64))
+        thread::sleep(Duration::from_micros(thread_rng().gen_range(0, 100) as u64))
     }
 
     let duration = start.elapsed().as_millis();
 
+    println!();
     println!("{:<20}{:<20}{:<20}", "num_ops", "key_range", "time_ms");
     println!("{:<20}{:<20}{:<20}", num_ops, key_range, duration);
     println!("{:<20}{:<20}{:<20}{:<20}", "put_success", "put_fail", "get_success", "get_fail");
     println!("{:<20}{:<20}{:<20}{:<20}", put_success, put_fail, get_success, get_fail);
     println!("{:<20}{:<20}", "throughput (ops/ms)", "latency (ms/ops)");
-    println!("{:<20}{:<20}", (num_ops as u128) / duration, duration / (num_ops as u128));
+    println!("{:<20.3}{:<20.3}", num_ops as f64 / duration as f64, duration as f64 / num_ops as f64);
     println!("{:<20}", "neg_ack");
     println!("{:<20}", neg_ack);
+    println!();
 }
 
 fn parse_settings() -> Result<(Vec<String>, Vec<String>, i32, i32), ConfigError> {
@@ -67,18 +71,9 @@ fn parse_settings() -> Result<(Vec<String>, Vec<String>, i32, i32), ConfigError>
 
     let mut config = config::Config::default();
     // Add in server_settings.yaml
-    config.merge(config::File::from(Path::new("./settings/client_settings.yaml")))?;
+    config.merge(config::File::from(Path::new("./settings.yaml")))?;
 //    println!("{:#?}", config);
-    let client_ips = config.get_array("client_ips")?;
-    let server_ips = config.get_array("server_ips")?;
-
-    // Now convert them to strings
-    let client_ips = client_ips.into_iter()
-        .map(|s| s.into_str().expect("Could not parse IP into str"))
-        .collect();
-    let server_ips = server_ips.into_iter()
-        .map(|s| s.into_str().expect("Could not parse IP into str"))
-        .collect();
+    let (client_ips, server_ips) = parse_ips(&config)?;
 
     // Gather the other settings
     let num_ops = config.get_int("num_ops")?;
@@ -136,6 +131,8 @@ fn write_command(c: &Command, server_ip: &String) -> CommandResponse {
 
 fn map_server_ip(key: KeyType, node_ips: &Vec<String>, key_range: i32) -> &String {
     // FIXME: This is gross, and relies on the fact that generating key is exclusive of key_range
-    node_ips.get((key as f64 / key_range as f64) as usize * node_ips.len() as usize)
+    let index: usize = ((key as f64 / key_range as f64) * node_ips.len() as f64) as usize;
+//    println!("Selected index {:?} for key {:?}", index, key);
+    node_ips.get(index)
         .expect("Could not map key to server")
 }

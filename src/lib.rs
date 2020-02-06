@@ -1,5 +1,6 @@
 
 
+
 pub mod protocol {
     use serde::{Serialize, Deserialize};
     use std::net::{TcpListener, TcpStream, SocketAddr};
@@ -31,7 +32,7 @@ pub mod protocol {
         NotAllReady,
     }
 
-    pub fn barrier(barrier_ips: Vec<String>, listen_port: u16) {
+    pub fn barrier(barrier_ips: Vec<String>, listener: &TcpListener) {
         // Distributed Barrier (My idea)
         // When coming online, go into "listen" mode and send a message to all IP's.
         // Wait for an acknowledgement from everyone (including yourself)
@@ -39,9 +40,7 @@ pub mod protocol {
         //  - If someone does not acknowledge, just keep listening.
 
         // Bind the broadcast listener
-        let listener = TcpListener::bind(("0.0.0.0", listen_port))
-            .expect("Unable to bind listener");
-        println!("Listening for barrier on port: {}", listen_port);
+        println!("Listening for barrier on {:?}", listener);
 
         // Spawn the broadcast thread.
         let handle = thread::spawn(move || {
@@ -95,5 +94,26 @@ pub mod protocol {
         for stream in open_streams {
             to_writer(stream, &AllReady).expect("Failed to send AllReady");
         }
+    }
+}
+
+pub mod settings {
+    use config::{ConfigError, Config};
+    use std::path::Path;
+
+    // Shared get_ips method, so both client and server can use it.
+    pub fn parse_ips(config: &Config) -> Result<(Vec<String>, Vec<String>), ConfigError> {
+        let client_ips = config.get_array("client_ips")?;
+        let server_ips = config.get_array("server_ips")?;
+
+        // Now convert them to strings
+        let client_ips = client_ips.into_iter()
+            .map(|s| s.into_str().expect("Could not parse IP into str"))
+            .collect();
+        let server_ips = server_ips.into_iter()
+            .map(|s| s.into_str().expect("Could not parse IP into str"))
+            .collect();
+
+        Ok((client_ips, server_ips))
     }
 }
