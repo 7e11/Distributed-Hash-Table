@@ -52,14 +52,14 @@ fn main() {
         thread::sleep(Duration::from_micros(thread_rng().gen_range(0, 100) as u64))
     }
 
-    let duration = start.elapsed().as_millis();
+    let duration = start.elapsed().as_secs();
 
     println!();
     println!("{:<20}{:<20}{:<20}", "num_ops", "key_range", "time_ms");
     println!("{:<20}{:<20}{:<20}", num_ops, key_range, duration);
     println!("{:<20}{:<20}{:<20}{:<20}", "put_success", "put_fail", "get_success", "get_fail");
     println!("{:<20}{:<20}{:<20}{:<20}", put_success, put_fail, get_success, get_fail);
-    println!("{:<20}{:<20}", "throughput (ops/ms)", "latency (ms/ops)");
+    println!("{:<20}{:<20}", "throughput (ops/s)", "latency (s/op)");
     println!("{:<20.3}{:<20.3}", num_ops as f64 / duration as f64, duration as f64 / num_ops as f64);
     println!("{:<20}", "neg_ack");
     println!("{:<20}", neg_ack);
