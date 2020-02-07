@@ -97,6 +97,51 @@ pub mod protocol {
     }
 }
 
+
+pub mod pool {
+    use std::collections::VecDeque;
+    use std::net::TcpStream;
+    use std::sync::{Mutex, Condvar, Arc};
+    use std::thread::{Thread, JoinHandle};
+    use std::thread;
+
+//    pub struct ThreadQueue {
+//        // TODO: Make generic
+//        work_queue: Arc<(Mutex<VecDeque<TcpStream>>, Condvar)>,
+//        // Only accessed at startup. Is it ok to be in a mutex?
+//        threads: Vec<JoinHandle<_>>,
+//
+//    }
+    // https://doc.rust-lang.org/1.25.0/book/second-edition/ch20-03-designing-the-interface.html
+    // https://doc.rust-lang.org/1.25.0/book/second-edition/ch20-04-storing-threads.html
+//    impl ThreadQueue {
+//        // Doesn't need &self as their first parameter b/c it's not called on an instance.
+//        pub fn new<F>(size: usize, f: F) -> ThreadQueue
+//            where F: FnOnce() + Send + 'static {
+//            assert!(size > 0);
+//            let mut threads = Vec::new();
+//            for _ in 0..size {
+//                threads.push(thread::spawn(move || f));
+//            }
+//
+//            ThreadQueue {
+//                work_queue: Arc::new((Mutex::new(VecDeque::new()), Condvar::new())),
+//                threads
+//            }
+//        }
+//
+//        fn add_work(&self, ) {
+//
+//        }
+//
+//
+//        pub fn execute<F>(&self, f: F)
+//            where F: FnOnce() + Send + 'static {
+//
+//        }
+//    }
+}
+
 pub mod settings {
     use config::{ConfigError, Config};
     use std::path::Path;
