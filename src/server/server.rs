@@ -5,15 +5,14 @@ use serde_json::{to_writer};
 use cse403_distributed_hash_table::protocol::{Command, barrier};
 use cse403_distributed_hash_table::protocol::Command::{Get, Put};
 use serde::Deserialize;
-use std::path::Path;
-use config::{ConfigError};
 use cse403_distributed_hash_table::protocol::CommandResponse::{GetAck, PutAck};
-use cse403_distributed_hash_table::settings::parse_ips;
+use cse403_distributed_hash_table::settings::{parse_settings};
+use std::collections::hash_map::Entry;
 
 
 fn main() {
-    let (client_ips, server_ips) = parse_settings().expect("Failed to parse settings");
-    // Listener for the lifetime of the program
+    let (client_ips, server_ips, _, _) = parse_settings()
+        .expect("Unable to parse settings");
     let listener = TcpListener::bind(("0.0.0.0", 40480))
         .expect("Unable to bind listener");
     // Consume both vectors.
@@ -22,19 +21,8 @@ fn main() {
     application_listener(listener)
 }
 
-
-fn parse_settings() -> Result<(Vec<String>, Vec<String>), ConfigError> {
-    // Expand the Vec<String> to encompass more types as the settings file increases in size.
-    // See: https://github.com/mehcode/config-rs/blob/master/examples/simple/src/main.rs
-    let mut config = config::Config::default();
-    config.merge(config::File::from(Path::new("./settings.yaml")))?;
-    parse_ips(&config)
-}
-
 fn application_listener(listener: TcpListener) {
     println!("Listening for applications on {:?}", listener);
-    // TODO: Add neg ack responses if there is contention for the lock.
-    // setup a basic hash table.    TODO (with a mutex and arc)
     let mut hash_table = HashMap::new();
     // Setup network
     // https://stackoverflow.com/questions/51809603/why-does-serde-jsonfrom-reader-take-ownership-of-the-reader
@@ -48,11 +36,10 @@ fn application_listener(listener: TcpListener) {
 //                println!("Received: {:?}", c);
                 match c {
                     Put(key, value) => {
-                        // This should probably be an if, I'm just messing around.
-                        let res = match hash_table.contains_key(&key) {
-                            true => false,
-                            false => {
-                                hash_table.insert(key, value);
+                        let res = match hash_table.entry(key) {
+                            Entry::Occupied(_) => false,
+                            Entry::Vacant(v) => {
+                                v.insert(value);
                                 true
                             },
                         };

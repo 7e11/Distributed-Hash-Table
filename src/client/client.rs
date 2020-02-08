@@ -5,11 +5,9 @@ use rand::{thread_rng, Rng};
 use std::time::{Instant, Duration};
 
 use cse403_distributed_hash_table::protocol::{Command, KeyType, ValueType, barrier, CommandResponse};
-use config::ConfigError;
-use std::path::Path;
 use cse403_distributed_hash_table::protocol::CommandResponse::{PutAck, GetAck, NegAck};
 use std::thread;
-use cse403_distributed_hash_table::settings::parse_ips;
+use cse403_distributed_hash_table::settings::{parse_settings};
 
 
 fn main() {
@@ -49,7 +47,7 @@ fn main() {
             }
         }
         // Think Time
-        thread::sleep(Duration::from_micros(thread_rng().gen_range(0, 100) as u64))
+//        thread::sleep(Duration::from_micros(thread_rng().gen_range(0, 100) as u64))
     }
 
     let duration = start.elapsed().as_millis();
@@ -59,30 +57,14 @@ fn main() {
     println!("{:<20}{:<20}{:<20}", num_ops, key_range, duration);
     println!("{:<20}{:<20}{:<20}{:<20}", "put_success", "put_fail", "get_success", "get_fail");
     println!("{:<20}{:<20}{:<20}{:<20}", put_success, put_fail, get_success, get_fail);
-    println!("{:<20}{:<20}", "throughput (ops/ms)", "latency (ms/ops)");
-    println!("{:<20.3}{:<20.3}", num_ops as f64 / duration as f64, duration as f64 / num_ops as f64);
+    println!("{:<20}{:<20}", "throughput (ops/ms)", "latency (ms/op)");
+    println!("{:<20.10}{:<20.10}", num_ops as f64 / duration as f64, duration as f64 / num_ops as f64);
     println!("{:<20}", "neg_ack");
     println!("{:<20}", neg_ack);
     println!();
 }
 
-fn parse_settings() -> Result<(Vec<String>, Vec<String>, i32, i32), ConfigError> {
-    // Returns client_ips, server_ips, num_ops, key_range all as a tuple.
-
-    let mut config = config::Config::default();
-    // Add in server_settings.yaml
-    config.merge(config::File::from(Path::new("./settings.yaml")))?;
-//    println!("{:#?}", config);
-    let (client_ips, server_ips) = parse_ips(&config)?;
-
-    // Gather the other settings
-    let num_ops = config.get_int("num_ops")?;
-    let key_range = config.get_int("key_range")?;
-
-    Ok((client_ips, server_ips, num_ops as i32, key_range as i32))
-}
-
-fn put(key: KeyType, value: ValueType, node_ips: &Vec<String>, key_range: i32) -> (bool, u32) {
+fn put(key: KeyType, value: ValueType, node_ips: &Vec<String>, key_range: u32) -> (bool, u32) {
     // Returns the result of the put, and the number of retries as a tuple.
 
     let c = Command::Put(key, value);
@@ -102,7 +84,7 @@ fn put(key: KeyType, value: ValueType, node_ips: &Vec<String>, key_range: i32) -
     }
 }
 
-fn get(key: KeyType, node_ips: &Vec<String>, key_range: i32) -> (Option<ValueType>, u32) {
+fn get(key: KeyType, node_ips: &Vec<String>, key_range: u32) -> (Option<ValueType>, u32) {
     // Returns the result of the put, and the number of retries as a tuple.
 
     let c = Command::Get(key);
@@ -129,7 +111,7 @@ fn write_command(c: &Command, server_ip: &String) -> CommandResponse {
     from_reader(&mut stream).expect("Unable to read Response")
 }
 
-fn map_server_ip(key: KeyType, node_ips: &Vec<String>, key_range: i32) -> &String {
+fn map_server_ip(key: KeyType, node_ips: &Vec<String>, key_range: u32) -> &String {
     // FIXME: This is gross, and relies on the fact that generating key is exclusive of key_range
     let index: usize = ((key as f64 / key_range as f64) * node_ips.len() as f64) as usize;
 //    println!("Selected index {:?} for key {:?}", index, key);

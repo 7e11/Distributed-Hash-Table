@@ -10,7 +10,7 @@ pub mod protocol {
     use crate::protocol::BarrierCommand::{AllReady, NotAllReady};
     use std::str::FromStr;
 
-    pub type KeyType = i32;         // TODO: Make generic (from config file?)
+    pub type KeyType = u32;         // TODO: Make generic (from config file?)
     pub type ValueType = String;    // TODO: Should be Any (Or equivalent)
 
     #[derive(Serialize, Deserialize, Debug)]
@@ -115,5 +115,21 @@ pub mod settings {
             .collect();
 
         Ok((client_ips, server_ips))
+    }
+
+    pub fn parse_settings() -> Result<(Vec<String>, Vec<String>, u32, u32), ConfigError> {
+        // Returns client_ips, server_ips, num_ops, key_range all as a tuple.
+
+        let mut config = config::Config::default();
+        // Add in server_settings.yaml
+        config.merge(config::File::from(Path::new("./settings.yaml")))?;
+//    println!("{:#?}", config);
+        let (client_ips, server_ips) = parse_ips(&config)?;
+
+        // Gather the other settings
+        let num_ops = config.get_int("num_ops")?;
+        let key_range = config.get_int("key_range")?;
+
+        Ok((client_ips, server_ips, num_ops as u32, key_range as u32))
     }
 }
