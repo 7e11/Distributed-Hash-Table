@@ -1,6 +1,3 @@
-
-
-
 pub mod protocol {
     use serde::{Serialize, Deserialize};
     use std::net::{TcpListener, TcpStream, SocketAddr};
@@ -99,15 +96,12 @@ pub mod protocol {
 
 pub mod util {
     use std::sync::{RwLock, Mutex};
+    use crate::protocol::{KeyType, ValueType};
     use crate::util::LockCheck::{LockFail, Type};
-    use std::hash::Hash;
-    use std::convert::{TryInto};
-    use std::fmt::Debug;
 
     // TODO: Make generic for real...
-    #[allow(dead_code)]
-    pub struct ConcurrentHashTable<K, V> {
-        buckets: RwLock<Vec<Mutex<Vec<(K, V)>>>>,
+    pub struct ConcurrentHashTable {
+        buckets: RwLock<Vec<Mutex<Vec<(KeyType, ValueType)>>>>,
         num_buckets: usize,
         key_range: u32,
         num_servers: usize,
@@ -118,21 +112,12 @@ pub mod util {
         Type(T),
     }
 
-    // See: https://github.com/rust-lang/hashbrown/blob/master/src/map.rs
-    // See: https://doc.rust-lang.org/std/collections/struct.HashMap.html
-    // For borrows: https://doc.rust-lang.org/std/borrow/trait.Borrow.html
-    // TODO: Clean this up. Any way to implement a hash for Hashable types, but usize for numbers?
-    impl<K, V> ConcurrentHashTable<K, V>
-        where
-            K: Eq + Hash + Copy + TryInto<usize>,
-            <K as TryInto<usize>>::Error: Debug,
-            V: Clone {
-
-        pub fn new(num_buckets: usize, key_range: u32, num_servers: usize) -> Self {
+    impl ConcurrentHashTable {
+        pub fn new(num_buckets: usize, key_range: u32, num_servers: usize) -> ConcurrentHashTable {
             assert!(num_buckets > 0 && key_range > 0 && num_servers > 0);
 
             // Abusing RW locks (kind of) in order to avoid unsafe code.
-            let buckets: RwLock<Vec<Mutex<Vec<(K, V)>>>>
+            let buckets: RwLock<Vec<Mutex<Vec<(KeyType, ValueType)>>>>
                 = RwLock::new(Vec::with_capacity(num_buckets));
             let mut buckets_lock = buckets.write().unwrap();
             for _ in 0..num_buckets {
@@ -149,7 +134,7 @@ pub mod util {
 
         // DIFFERENCES:
         // This clones the value type. Convenient for later.
-        pub fn get(&self, key: &K) -> LockCheck<Option<V>> {
+        pub fn get(&self, key: &KeyType) -> LockCheck<Option<ValueType>> {
             let buckets = self.buckets.read().unwrap();
             let bucket_lock = buckets.get(self.compute_bucket(key)).unwrap();
             // TRY LOCK !
@@ -171,7 +156,7 @@ pub mod util {
 
 
         // DOES update keys to new values
-        pub fn insert(&self, key: K, value: V) -> LockCheck<Option<V>> {
+        pub fn insert(&self, key: KeyType, value: ValueType) -> LockCheck<Option<ValueType>> {
             let buckets = self.buckets.read().unwrap();
             let bucket_lock = buckets.get(self.compute_bucket(&key)).unwrap();
             // TRY LOCK !
@@ -180,7 +165,7 @@ pub mod util {
                 Err(_) => LockFail,
                 // FIXME: Does this work???
                 Ok(mut bucket) => {
-                    let index = bucket.iter().position(|(k, _)| k == &key);
+                    let index = bucket.iter().position(|(k, _)| *k == key);
                     if let Some(index) = index {
                         // The key already existed, update it.
                         let pair = bucket.get_mut(index).unwrap();
@@ -198,7 +183,7 @@ pub mod util {
             }
         }
 
-        pub fn contains_key(&self, key: &K) -> LockCheck<bool> {
+        pub fn contains_key(&self, key: &KeyType) -> LockCheck<bool> {
             let buckets = self.buckets.read().unwrap();
             let bucket_lock = buckets.get(self.compute_bucket(key)).unwrap();
             // TRY LOCK !
@@ -212,7 +197,7 @@ pub mod util {
             }
         }
 
-        pub fn insert_if_absent(&self, key: K, value: V) -> LockCheck<bool> {
+        pub fn insert_if_absent(&self, key: KeyType, value: ValueType) -> LockCheck<bool> {
             // true means inserted, false means not inserted (there was something already there)
             let buckets = self.buckets.read().unwrap();
             let bucket_lock = buckets.get(self.compute_bucket(&key)).unwrap();
@@ -221,7 +206,7 @@ pub mod util {
             match bucket_lock {
                 Err(_) => LockFail,
                 Ok(mut bucket) => {
-                    let res = bucket.iter().any(|(k, _)| k == &key);
+                    let res = bucket.iter().any(|(k, _)| *k == key);
                     if res {
                         // The key exists already
                         Type(false)
@@ -234,15 +219,14 @@ pub mod util {
             }
         }
 
-        fn compute_bucket(&self, key: &K) -> usize {
+        fn compute_bucket(&self, key: &KeyType) -> usize {
             // As for mapping,      (key / num_servers)   normalizes between 0 and key_range / 3
             // [0, 3, 6, 9] => [0, 1, 2, 3]
             // [2, 5, 8, 11]=> [0, 1, 2, 3]
             // then mod by number of buckets
             // If I do this cleverly, I can basically cheat by making the # buckets
             // exactly as large as it needs to be for every key to have its own bucket.
-            let key: usize = (*key).try_into().unwrap();
-            (key / self.num_servers) % self.num_buckets
+            (*key as usize / self.num_servers) % self.num_buckets
         }
     }
 }
@@ -283,4 +267,3 @@ pub mod settings {
         Ok((client_ips, server_ips, num_ops as u32, key_range as u32))
     }
 }
-
