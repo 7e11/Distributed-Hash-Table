@@ -10,7 +10,7 @@ pub mod protocol {
     use crate::protocol::BarrierCommand::{AllReady, NotAllReady};
     use std::str::FromStr;
 
-    pub type KeyType = i32;         // TODO: Make generic (from config file?)
+    pub type KeyType = u32;         // TODO: Make generic (from config file?)
     pub type ValueType = String;    // TODO: Should be Any (Or equivalent)
 
     #[derive(Serialize, Deserialize, Debug)]
@@ -97,49 +97,141 @@ pub mod protocol {
     }
 }
 
+pub mod util {
+    use std::sync::{RwLock, Mutex};
+    use crate::protocol::{KeyType, ValueType};
+    use crate::util::LockCheck::{LockFail, Type};
 
-pub mod pool {
-    use std::collections::VecDeque;
-    use std::net::TcpStream;
-    use std::sync::{Mutex, Condvar, Arc};
-    use std::thread::{Thread, JoinHandle};
-    use std::thread;
+    // TODO: Make generic for real...
+    pub struct ConcurrentHashTable {
+        buckets: RwLock<Vec<Mutex<Vec<(KeyType, ValueType)>>>>,
+        num_buckets: usize,
+        key_range: u32,
+        num_servers: usize,
+    }
 
-//    pub struct ThreadQueue {
-//        // TODO: Make generic
-//        work_queue: Arc<(Mutex<VecDeque<TcpStream>>, Condvar)>,
-//        // Only accessed at startup. Is it ok to be in a mutex?
-//        threads: Vec<JoinHandle<_>>,
-//
-//    }
-    // https://doc.rust-lang.org/1.25.0/book/second-edition/ch20-03-designing-the-interface.html
-    // https://doc.rust-lang.org/1.25.0/book/second-edition/ch20-04-storing-threads.html
-//    impl ThreadQueue {
-//        // Doesn't need &self as their first parameter b/c it's not called on an instance.
-//        pub fn new<F>(size: usize, f: F) -> ThreadQueue
-//            where F: FnOnce() + Send + 'static {
-//            assert!(size > 0);
-//            let mut threads = Vec::new();
-//            for _ in 0..size {
-//                threads.push(thread::spawn(move || f));
-//            }
-//
-//            ThreadQueue {
-//                work_queue: Arc::new((Mutex::new(VecDeque::new()), Condvar::new())),
-//                threads
-//            }
-//        }
-//
-//        fn add_work(&self, ) {
-//
-//        }
-//
-//
-//        pub fn execute<F>(&self, f: F)
-//            where F: FnOnce() + Send + 'static {
-//
-//        }
-//    }
+    pub enum LockCheck<T> {
+        LockFail,
+        Type(T),
+    }
+
+    impl ConcurrentHashTable {
+        pub fn new(num_buckets: usize, key_range: u32, num_servers: usize) -> ConcurrentHashTable {
+            assert!(num_buckets > 0 && key_range > 0 && num_servers > 0);
+
+            // Abusing RW locks (kind of) in order to avoid unsafe code.
+            let buckets: RwLock<Vec<Mutex<Vec<(KeyType, ValueType)>>>>
+                = RwLock::new(Vec::with_capacity(num_buckets));
+            let mut buckets_lock = buckets.write().unwrap();
+            for _ in 0..num_buckets {
+                buckets_lock.push(Mutex::new(Vec::new()));
+            }
+            drop(buckets_lock);
+            ConcurrentHashTable {
+                buckets,
+                num_buckets,
+                key_range,
+                num_servers
+            }
+        }
+
+        // DIFFERENCES:
+        // This clones the value type. Convenient for later.
+        pub fn get(&self, key: &KeyType) -> LockCheck<Option<ValueType>> {
+            let buckets = self.buckets.read().unwrap();
+            let bucket_lock = buckets.get(self.compute_bucket(key)).unwrap();
+            // TRY LOCK !
+            let bucket_lock = bucket_lock.try_lock();
+            match bucket_lock {
+                Err(_) => LockFail,
+                Ok(bucket) => {
+                    let res = bucket.iter().find_map(|(k, v)| {
+                        if k == key {
+                            Some(v.clone())
+                        } else {
+                            None
+                        }
+                    });
+                    Type(res)
+                },
+            }
+        }
+
+
+        // DOES update keys to new values
+        pub fn insert(&self, key: KeyType, value: ValueType) -> LockCheck<Option<ValueType>> {
+            let buckets = self.buckets.read().unwrap();
+            let bucket_lock = buckets.get(self.compute_bucket(&key)).unwrap();
+            // TRY LOCK !
+            let bucket_lock = bucket_lock.try_lock();
+            match bucket_lock {
+                Err(_) => LockFail,
+                // FIXME: Does this work???
+                Ok(mut bucket) => {
+                    let index = bucket.iter().position(|(k, _)| *k == key);
+                    if let Some(index) = index {
+                        // The key already existed, update it.
+                        let pair = bucket.get_mut(index).unwrap();
+                        // FIXME: This performance is gonna suck. Try doing something else.
+                        // Look into entry and or_insert.
+                        let prev_value = pair.1.clone();
+                        pair.1 = value;
+                        Type(Some(prev_value))
+                    } else {
+                        // The key has not existed, append it.
+                        bucket.push((key, value));
+                        Type(None)
+                    }
+                },
+            }
+        }
+
+        pub fn contains_key(&self, key: &KeyType) -> LockCheck<bool> {
+            let buckets = self.buckets.read().unwrap();
+            let bucket_lock = buckets.get(self.compute_bucket(key)).unwrap();
+            // TRY LOCK !
+            let bucket_lock = bucket_lock.try_lock();
+            match bucket_lock {
+                Err(_) => LockFail,
+                Ok(bucket) => {
+                    let res = bucket.iter().any(|(k, _)| k == key);
+                    Type(res)
+                },
+            }
+        }
+
+        pub fn insert_if_absent(&self, key: KeyType, value: ValueType) -> LockCheck<bool> {
+            // true means inserted, false means not inserted (there was something already there)
+            let buckets = self.buckets.read().unwrap();
+            let bucket_lock = buckets.get(self.compute_bucket(&key)).unwrap();
+            // TRY LOCK !
+            let bucket_lock = bucket_lock.try_lock();
+            match bucket_lock {
+                Err(_) => LockFail,
+                Ok(mut bucket) => {
+                    let res = bucket.iter().any(|(k, _)| *k == key);
+                    if res {
+                        // The key exists already
+                        Type(false)
+                    } else {
+                        // The key does not exist
+                        bucket.push((key, value));
+                        Type(true)
+                    }
+                },
+            }
+        }
+
+        fn compute_bucket(&self, key: &KeyType) -> usize {
+            // As for mapping,      (key / num_servers)   normalizes between 0 and key_range / 3
+            // [0, 3, 6, 9] => [0, 1, 2, 3]
+            // [2, 5, 8, 11]=> [0, 1, 2, 3]
+            // then mod by number of buckets
+            // If I do this cleverly, I can basically cheat by making the # buckets
+            // exactly as large as it needs to be for every key to have its own bucket.
+            (*key as usize / self.num_servers) % self.num_buckets
+        }
+    }
 }
 
 pub mod settings {
@@ -161,4 +253,21 @@ pub mod settings {
 
         Ok((client_ips, server_ips))
     }
+
+    pub fn parse_settings() -> Result<(Vec<String>, Vec<String>, u32, u32), ConfigError> {
+        // Returns client_ips, server_ips, num_ops, key_range all as a tuple.
+
+        let mut config = config::Config::default();
+        // Add in server_settings.yaml
+        config.merge(config::File::from(Path::new("./settings.yaml")))?;
+//    println!("{:#?}", config);
+        let (client_ips, server_ips) = parse_ips(&config)?;
+
+        // Gather the other settings
+        let num_ops = config.get_int("num_ops")?;
+        let key_range = config.get_int("key_range")?;
+
+        Ok((client_ips, server_ips, num_ops as u32, key_range as u32))
+    }
 }
+

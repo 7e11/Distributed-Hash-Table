@@ -1,42 +1,42 @@
-use std::net::{TcpListener, TcpStream};
-use std::collections::{HashMap, VecDeque};
+use std::net::{TcpListener};
+use std::collections::{VecDeque};
 use serde_json::{to_writer};
 
-use cse403_distributed_hash_table::protocol::{Command, barrier};
+use cse403_distributed_hash_table::protocol::{Command, barrier, ValueType, KeyType};
 use cse403_distributed_hash_table::protocol::Command::{Get, Put};
 use serde::Deserialize;
-use std::path::Path;
-use config::{ConfigError};
 use cse403_distributed_hash_table::protocol::CommandResponse::{GetAck, PutAck, NegAck};
-use cse403_distributed_hash_table::settings::parse_ips;
+use cse403_distributed_hash_table::settings::{parse_settings};
 use std::sync::{Arc, Mutex, Condvar};
 use std::thread;
+use cse403_distributed_hash_table::util::{ConcurrentHashTable};
+use cse403_distributed_hash_table::util::LockCheck::{LockFail, Type};
+
 
 fn main() {
-    let (client_ips, server_ips) = parse_settings().expect("Failed to parse settings");
+    let (client_ips, server_ips, _, key_range) = parse_settings()
+        .expect("Unable to parse settings");
     // Listener for the lifetime of the program
     let listener = TcpListener::bind(("0.0.0.0", 40480))
         .expect("Unable to bind listener");
     // Consume both vectors.
+    let num_servers = server_ips.len();
     let barrier_ips = client_ips.into_iter().chain(server_ips.into_iter()).collect();
     barrier(barrier_ips, &listener);
-    application_listener(listener)
+    application_listener(listener, key_range, num_servers)
 }
 
-
-fn parse_settings() -> Result<(Vec<String>, Vec<String>), ConfigError> {
-    // Expand the Vec<String> to encompass more types as the settings file increases in size.
-    // See: https://github.com/mehcode/config-rs/blob/master/examples/simple/src/main.rs
-    let mut config = config::Config::default();
-    config.merge(config::File::from(Path::new("./settings.yaml")))?;
-    parse_ips(&config)
-}
-
-fn application_listener(listener: TcpListener) {
+fn application_listener(listener: TcpListener, key_range: u32, num_servers: usize) {
     println!("Listening for applications on {:?}", listener);
-    // TODO: Add neg ack responses if there is contention for the lock.
 
-    let hash_table_arc = Arc::new(Mutex::new(HashMap::new()));
+    // Create a concurrent hash table
+    let hash_table_arc =
+        Arc::new(ConcurrentHashTable::new(1024, key_range, num_servers));
+
+
+//    let hash_table_arc = Arc::new(Mutex::new(HashMap::new()));
+
+
     let work_queue_arc= Arc::new((Mutex::new(VecDeque::new()), Condvar::new()));
     let num_threads = 4;
     let mut threads = Vec::new();
@@ -64,42 +64,20 @@ fn application_listener(listener: TcpListener) {
 //                println!("{} Received: {:?}", thread::current().name().unwrap(), c);
                 match c {
                     Put(key, value) => {
-                        let hash_table_res = ht_arc.try_lock();
+                        let hash_table_res = ht_arc.insert_if_absent(key, value);
                         let resp = match hash_table_res {
-                            Err(e) => {
-//                                println!("{} Failed lock", thread::current().name().unwrap());
-                                NegAck
-                            },
-                            Ok(mut hash_table) => {
-//                                println!("{} Acquired lock", thread::current().name().unwrap());
-                                if hash_table.contains_key(&key) {
-                                    PutAck(false)
-                                } else {
-                                    hash_table.insert(key, value);
-                                    PutAck(true)
-                                }
-                            },
+                            LockFail => NegAck,
+                            Type(b) => PutAck(b),
                         };
+
                         to_writer(&mut s, &resp)
                             .expect("Could not write Put result");
                     },
                     Get(key) => {
-                        let hash_table_res = ht_arc.try_lock();
+                        let hash_table_res = ht_arc.get(&key);
                         let resp = match hash_table_res {
-                            Err(e) => {
-//                                println!("{} Failed lock", thread::current().name().unwrap());
-                                NegAck
-                            },
-                            Ok(hash_table) => {
-//                                println!("{} Acquired lock", thread::current().name().unwrap());
-                                let opt = hash_table.get(&key);
-                                // TODO: I'll need to unwrap this here in order to clone it. Is there a better way?
-                                let opt = match opt {
-                                    Some(vt) => Some(vt.clone()),
-                                    None => None,
-                                };
-                                GetAck(opt)
-                            },
+                            LockFail => NegAck,
+                            Type(o) => GetAck(o),
                         };
                         to_writer(&mut s, &resp)
                             .expect("Could not write Get result");
@@ -117,7 +95,7 @@ fn application_listener(listener: TcpListener) {
     for res_stream in listener.incoming() {
         match res_stream {
             Err(e) => eprintln!("Couldn't accept connection: {}", e),
-            Ok(mut stream) => {
+            Ok(stream) => {
                 // Lock the queue
                 // Add the stream to it
                 // Notify one
