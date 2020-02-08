@@ -46,8 +46,8 @@ fn main() {
                 None => get_fail += 1,
             }
         }
-        // Think Time
-        thread::sleep(Duration::from_micros(thread_rng().gen_range(0, 100) as u64))
+        // Think Time (Not necessary for closed loop)
+//        thread::sleep(Duration::from_micros(thread_rng().gen_range(0, 100) as u64))
     }
 
     let duration = start.elapsed().as_millis();

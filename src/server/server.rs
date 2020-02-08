@@ -2,7 +2,7 @@ use std::net::{TcpListener};
 use std::collections::{VecDeque};
 use serde_json::{to_writer};
 
-use cse403_distributed_hash_table::protocol::{Command, barrier, ValueType, KeyType};
+use cse403_distributed_hash_table::protocol::{Command, barrier};
 use cse403_distributed_hash_table::protocol::Command::{Get, Put};
 use serde::Deserialize;
 use cse403_distributed_hash_table::protocol::CommandResponse::{GetAck, PutAck, NegAck};
@@ -34,12 +34,9 @@ fn application_listener(listener: TcpListener, key_range: u32, num_servers: usiz
         Arc::new(ConcurrentHashTable::new(1024, key_range, num_servers));
 
 
-//    let hash_table_arc = Arc::new(Mutex::new(HashMap::new()));
-
-
-    let work_queue_arc= Arc::new((Mutex::new(VecDeque::new()), Condvar::new()));
     let num_threads = 4;
-    let mut threads = Vec::new();
+    let work_queue_arc= Arc::new((Mutex::new(VecDeque::new()), Condvar::new()));
+    let mut threads = Vec::with_capacity(num_threads);
     // See: https://stackoverflow.com/questions/29870837/how-do-i-use-a-condvar-to-limit-multithreading
     for i in 0..num_threads {
         let ht_arc = hash_table_arc.clone();
@@ -53,6 +50,7 @@ fn application_listener(listener: TcpListener, key_range: u32, num_servers: usiz
                 while queue.is_empty() {
                     // Weird: https://stackoverflow.com/questions/56939439/how-do-i-use-a-condvar-without-moving-the-mutex-variable
                     queue = cvar.wait(queue).unwrap();
+//                    println!("{} Woke Up", thread::current().name().unwrap())
                 }
                 let mut s = queue.pop_front().unwrap();
                 drop(queue);    // Drop the lock on the queue.
