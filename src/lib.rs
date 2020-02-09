@@ -226,7 +226,12 @@ pub mod util {
             // then mod by number of buckets
             // If I do this cleverly, I can basically cheat by making the # buckets
             // exactly as large as it needs to be for every key to have its own bucket.
-            (*key as usize / self.num_servers) % self.num_buckets
+
+            // FIXME: We don't get [0, 3, 6, 9]... We get a contiguous range like [0, 1, 2, 3]
+//            (*key as usize / self.num_servers) % self.num_buckets
+
+            // This should work better.
+            *key as usize % self.num_buckets
         }
     }
 }

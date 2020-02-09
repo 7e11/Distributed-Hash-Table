@@ -59,7 +59,9 @@ fn application_listener(listener: TcpListener, key_range: u32, num_servers: usiz
                 // https://github.com/serde-rs/json/issues/522
                 let mut de = serde_json::Deserializer::from_reader(&mut s);
                 let c = Command::deserialize(&mut de).expect("Could not deserialize command.");
-//                println!("{} Received: {:?}", thread::current().name().unwrap(), c);
+
+//                println!("{} Received: {:?} From {:?}", thread::current().name().unwrap(), c, s);
+
                 match c {
                     Put(key, value) => {
                         let hash_table_res = ht_arc.insert_if_absent(key, value);
@@ -67,6 +69,8 @@ fn application_listener(listener: TcpListener, key_range: u32, num_servers: usiz
                             LockFail => NegAck,
                             Type(b) => PutAck(b),
                         };
+
+//                        println!("{} Response: {:?}", thread::current().name().unwrap(), resp);
 
                         to_writer(&mut s, &resp)
                             .expect("Could not write Put result");
@@ -77,6 +81,9 @@ fn application_listener(listener: TcpListener, key_range: u32, num_servers: usiz
                             LockFail => NegAck,
                             Type(o) => GetAck(o),
                         };
+
+//                        println!("{} Response: {:?}", thread::current().name().unwrap(), resp);
+
                         to_writer(&mut s, &resp)
                             .expect("Could not write Get result");
                     },

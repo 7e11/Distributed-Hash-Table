@@ -12,4 +12,4 @@ server_ips:
 
 num_ops: 10000
 
-key_range: 100
+key_range: 10

@@ -115,6 +115,5 @@ fn map_server_ip(key: KeyType, server_ips: &Vec<String>, key_range: u32) -> &Str
     // FIXME: This is gross, and relies on the fact that generating key is exclusive of key_range
     let index: usize = ((key as f64 / key_range as f64) * server_ips.len() as f64) as usize;
 //    println!("Selected index {:?} for key {:?}", index, key);
-    server_ips.get(index)
-        .expect("Could not map key to server")
+    server_ips.get(index).expect("Could not map key to server")
 }
