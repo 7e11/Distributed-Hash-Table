@@ -94,12 +94,66 @@ pub mod protocol {
     }
 }
 
-pub mod util {
-    use std::sync::{RwLock, Mutex};
-    use crate::protocol::{KeyType, ValueType};
-    use crate::util::LockCheck::{LockFail, Type};
+pub mod parallel {
+    use std::sync::{RwLock, Mutex, Arc, Condvar};
+    use crate::protocol::{KeyType, ValueType, Command};
+    use crate::parallel::LockCheck::{LockFail, Type};
+    use std::collections::VecDeque;
+    use std::net::TcpStream;
+    use crate::protocol::Command::{Put, Get};
+    use serde_json::to_writer;
+    use crate::protocol::CommandResponse::{NegAck, PutAck, GetAck};
+    use serde::Deserialize;
+
+    pub fn worker_func(ht_arc: Arc<ConcurrentHashTable>, wq_arc: Arc<(Mutex<VecDeque<TcpStream>>, Condvar)>) -> ! {
+        let (queue_lock, cvar) = &*wq_arc;
+        loop {
+            let mut queue = queue_lock.lock().unwrap();
+            while queue.is_empty() {
+                // Weird: https://stackoverflow.com/questions/56939439/how-do-i-use-a-condvar-without-moving-the-mutex-variable
+                queue = cvar.wait(queue).unwrap();
+//                    println!("{} Woke Up", thread::current().name().unwrap())
+            }
+            let mut s = queue.pop_front().unwrap();
+            drop(queue);    // Drop the lock on the queue.
+
+            handle_stream(&ht_arc, &mut s)
+        }
+    }
+
+    fn handle_stream(ht_arc: &Arc<ConcurrentHashTable>, mut s: &mut TcpStream) -> () {
+        // Deserialize from stream
+        // https://github.com/serde-rs/json/issues/522
+        let mut de = serde_json::Deserializer::from_reader(&mut s);
+        let c = Command::deserialize(&mut de).expect("Could not deserialize command.");
+//        println!("{} Received: {:?} From {:?}", thread::current().name().unwrap(), c, s);
+        // Handle the command
+        match c {
+            Put(key, value) => {
+                let hash_table_res = ht_arc.insert_if_absent(key, value);
+                let resp = match hash_table_res {
+                    LockFail => NegAck,
+                    Type(b) => PutAck(b),
+                };
+//               println!("{} Response: {:?}", thread::current().name().unwrap(), resp);
+                to_writer(&mut s, &resp)
+                    .expect("Could not write Put result");
+            },
+            Get(key) => {
+                let hash_table_res = ht_arc.get(&key);
+                let resp = match hash_table_res {
+                    LockFail => NegAck,
+                    Type(o) => GetAck(o),
+                };
+//                println!("{} Response: {:?}", thread::current().name().unwrap(), resp);
+                to_writer(&mut s, &resp)
+                    .expect("Could not write Get result");
+            },
+        }
+    }
 
     // TODO: Make generic for real...
+    #[allow(dead_code)]
     pub struct ConcurrentHashTable {
         buckets: RwLock<Vec<Mutex<Vec<(KeyType, ValueType)>>>>,
         num_buckets: usize,
@@ -220,17 +274,7 @@ pub mod util {
         }
 
         fn compute_bucket(&self, key: &KeyType) -> usize {
-            // As for mapping,      (key / num_servers)   normalizes between 0 and key_range / 3
-            // [0, 3, 6, 9] => [0, 1, 2, 3]
-            // [2, 5, 8, 11]=> [0, 1, 2, 3]
-            // then mod by number of buckets
-            // If I do this cleverly, I can basically cheat by making the # buckets
-            // exactly as large as it needs to be for every key to have its own bucket.
-
-            // FIXME: We don't get [0, 3, 6, 9]... We get a contiguous range like [0, 1, 2, 3]
-//            (*key as usize / self.num_servers) % self.num_buckets
-
-            // This should work better.
+            // We consistent hashing gives us contiguous ranges like [0, 1, 2, 3]
             *key as usize % self.num_buckets
         }
     }
@@ -241,7 +285,7 @@ pub mod settings {
     use std::path::Path;
 
     // Shared get_ips method, so both client and server can use it.
-    pub fn parse_ips(config: &Config) -> Result<(Vec<String>, Vec<String>), ConfigError> {
+    fn parse_ips(config: &Config) -> Result<(Vec<String>, Vec<String>), ConfigError> {
         let client_ips = config.get_array("client_ips")?;
         let server_ips = config.get_array("server_ips")?;
 

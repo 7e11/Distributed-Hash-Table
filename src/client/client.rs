@@ -11,7 +11,6 @@ use cse403_distributed_hash_table::settings::{parse_settings};
 
 
 fn main() {
-    // Parse settings
     let (client_ips, server_ips, num_ops, key_range) = parse_settings()
         .expect("Unable to parse settings");
     let listener = TcpListener::bind(("0.0.0.0", 40481))
@@ -19,8 +18,7 @@ fn main() {
     // Consume only the client_ips vector, clone server_ips.
     let barrier_ips = client_ips.into_iter().chain(server_ips.clone().into_iter()).collect();
     barrier(barrier_ips, &listener);
-    println!("{:?}", server_ips);
-    println!("Starting application");
+    println!("Client passed barrier");
 
     let (mut put_success, mut put_fail, mut get_success, mut get_fail, mut neg_ack) = (0, 0, 0, 0, 0);
     let do_put_dist = Bernoulli::from_ratio(4, 10).unwrap();
