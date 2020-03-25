@@ -4,10 +4,11 @@ use rand::distributions::{Bernoulli, Distribution};
 use rand::{thread_rng, Rng};
 use std::time::{Instant, Duration};
 
-use cse403_distributed_hash_table::protocol::{Command, KeyType, ValueType, barrier, CommandResponse};
-use cse403_distributed_hash_table::protocol::CommandResponse::{PutAck, GetAck, NegAck};
+use cse403_distributed_hash_table::barrier::{Command, KeyType, ValueType, barrier, CommandResponse};
+use cse403_distributed_hash_table::barrier::CommandResponse::{PutAck, GetAck, NegAck};
 use std::thread;
 use cse403_distributed_hash_table::settings::{parse_settings};
+use std::hash::{Hash, Hasher};
 
 
 fn main() {
@@ -100,18 +101,4 @@ fn get(key: KeyType, node_ips: &Vec<String>, key_range: u32) -> (Option<ValueTyp
         // Exponential backoff
         thread::sleep(Duration::from_micros(thread_rng().gen_range(0, 2u32.pow(retries)) as u64))
     }
-}
-
-fn write_command(c: &Command, server_ip: &String) -> CommandResponse {
-    let mut stream = TcpStream::connect(server_ip)
-        .expect("Unable to connect");
-    to_writer(&mut stream, &c).expect("Unable to write Command");
-    from_reader(&mut stream).expect("Unable to read Response")
-}
-
-fn map_server_ip(key: KeyType, server_ips: &Vec<String>, key_range: u32) -> &String {
-    // FIXME: This is gross, and relies on the fact that generating key is exclusive of key_range
-    let index: usize = ((key as f64 / key_range as f64) * server_ips.len() as f64) as usize;
-//    println!("Selected index {:?} for key {:?}", index, key);
-    server_ips.get(index).expect("Could not map key to server")
 }

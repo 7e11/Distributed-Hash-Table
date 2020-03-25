@@ -1,11 +1,16 @@
 use std::net::{TcpListener, TcpStream};
 use std::collections::{VecDeque};
 
-use cse403_distributed_hash_table::protocol::{barrier};
+use cse403_distributed_hash_table::barrier::{barrier};
 use cse403_distributed_hash_table::settings::{parse_settings};
 use std::sync::{Arc, Mutex, Condvar};
 use std::thread;
 use cse403_distributed_hash_table::parallel::{ConcurrentHashTable, worker_func};
+use cse403_distributed_hash_table::transport::Command;
+use cse403_distributed_hash_table::transport::Command::{Put, Get};
+use cse403_distributed_hash_table::parallel::LockCheck::{LockFail, Type};
+use cse403_distributed_hash_table::transport::CommandResponse::{NegAck, PutAck, GetAck};
+use serde_json::to_writer;
 
 
 fn main() {
@@ -27,7 +32,7 @@ fn setup_workers(key_range: u32, num_servers: usize, work_queue_arc: &Arc<(Mutex
     let num_threads = 4;
     let mut threads = Vec::with_capacity(num_threads);
     let hash_table_arc =
-        Arc::new(ConcurrentHashTable::new(1024, key_range, num_servers));
+        Arc::new(ConcurrentHashTable::new(4096, key_range, num_servers));
     // See: https://stackoverflow.com/questions/29870837/how-do-i-use-a-condvar-to-limit-multithreading
     for i in 0..num_threads {
         let ht_arc = hash_table_arc.clone();
@@ -52,6 +57,53 @@ fn listen(listener: TcpListener, work_queue_arc: Arc<(Mutex<VecDeque<TcpStream>>
                 cvar.notify_one();
             },
         }
+    }
+}
+
+pub fn worker_func(ht_arc: Arc<ConcurrentHashTable>, wq_arc: Arc<(Mutex<VecDeque<TcpStream>>, Condvar)>) -> ! {
+    let (queue_lock, cvar) = &*wq_arc;
+    loop {
+        let mut queue = queue_lock.lock().unwrap();
+        while queue.is_empty() {
+            // Weird: https://stackoverflow.com/questions/56939439/how-do-i-use-a-condvar-without-moving-the-mutex-variable
+            queue = cvar.wait(queue).unwrap();
+//                    println!("{} Woke Up", thread::current().name().unwrap())
+        }
+        let mut s = queue.pop_front().unwrap();
+        drop(queue);    // Drop the lock on the queue.
+
+        handle_stream(&ht_arc, &mut s)
+    }
+}
+
+fn handle_stream(ht_arc: &Arc<ConcurrentHashTable>, mut s: &mut TcpStream) -> () {
+    // Deserialize from stream
+    // https://github.com/serde-rs/json/issues/522
+    let mut de = serde_json::Deserializer::from_reader(&mut s);
+    let c = Command::deserialize(&mut de).expect("Could not deserialize command.");
+//        println!("{} Received: {:?} From {:?}", thread::current().name().unwrap(), c, s);
+    // Handle the command
+    match c {
+        Put(key, value) => {
+            let hash_table_res = ht_arc.insert_if_absent(key, value);
+            let resp = match hash_table_res {
+                LockFail => NegAck,
+                Type(b) => PutAck(b),
+            };
+//               println!("{} Response: {:?}", thread::current().name().unwrap(), resp);
+            to_writer(&mut s, &resp)
+                .expect("Could not write Put result");
+        },
+        Get(key) => {
+            let hash_table_res = ht_arc.get(&key);
+            let resp = match hash_table_res {
+                LockFail => NegAck,
+                Type(o) => GetAck(o),
+            };
+//                println!("{} Response: {:?}", thread::current().name().unwrap(), resp);
+            to_writer(&mut s, &resp)
+                .expect("Could not write Get result");
+        },
     }
 }
 

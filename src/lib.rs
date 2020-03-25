@@ -1,27 +1,11 @@
-pub mod protocol {
+pub mod barrier {
     use serde::{Serialize, Deserialize};
     use std::net::{TcpListener, TcpStream, SocketAddr};
     use std::thread;
     use std::time::Duration;
     use serde_json::to_writer;
-    use crate::protocol::BarrierCommand::{AllReady, NotAllReady};
+    use crate::barrier::BarrierCommand::{AllReady, NotAllReady};
     use std::str::FromStr;
-
-    pub type KeyType = u32;         // TODO: Make generic (from config file?)
-    pub type ValueType = String;    // TODO: Should be Any (Or equivalent)
-
-    #[derive(Serialize, Deserialize, Debug)]
-    pub enum Command {
-        Put(KeyType, ValueType),
-        Get(KeyType),
-    }
-
-    #[derive(Serialize, Deserialize, Debug)]
-    pub enum CommandResponse {
-        PutAck(bool),
-        GetAck(Option<ValueType>),
-        NegAck,
-    }
 
     #[derive(Serialize, Deserialize, Debug)]
     pub enum BarrierCommand {
@@ -96,61 +80,18 @@ pub mod protocol {
 
 pub mod parallel {
     use std::sync::{RwLock, Mutex, Arc, Condvar};
-    use crate::protocol::{KeyType, ValueType, Command};
+    use crate::barrier::{KeyType, ValueType, Command};
     use crate::parallel::LockCheck::{LockFail, Type};
     use std::collections::VecDeque;
     use std::net::TcpStream;
-    use crate::protocol::Command::{Put, Get};
+    use crate::barrier::Command::{Put, Get};
     use serde_json::to_writer;
-    use crate::protocol::CommandResponse::{NegAck, PutAck, GetAck};
+    use crate::barrier::CommandResponse::{NegAck, PutAck, GetAck};
     use serde::Deserialize;
-
-    pub fn worker_func(ht_arc: Arc<ConcurrentHashTable>, wq_arc: Arc<(Mutex<VecDeque<TcpStream>>, Condvar)>) -> ! {
-        let (queue_lock, cvar) = &*wq_arc;
-        loop {
-            let mut queue = queue_lock.lock().unwrap();
-            while queue.is_empty() {
-                // Weird: https://stackoverflow.com/questions/56939439/how-do-i-use-a-condvar-without-moving-the-mutex-variable
-                queue = cvar.wait(queue).unwrap();
-//                    println!("{} Woke Up", thread::current().name().unwrap())
-            }
-            let mut s = queue.pop_front().unwrap();
-            drop(queue);    // Drop the lock on the queue.
-
-            handle_stream(&ht_arc, &mut s)
-        }
-    }
-
-    fn handle_stream(ht_arc: &Arc<ConcurrentHashTable>, mut s: &mut TcpStream) -> () {
-        // Deserialize from stream
-        // https://github.com/serde-rs/json/issues/522
-        let mut de = serde_json::Deserializer::from_reader(&mut s);
-        let c = Command::deserialize(&mut de).expect("Could not deserialize command.");
-//        println!("{} Received: {:?} From {:?}", thread::current().name().unwrap(), c, s);
-        // Handle the command
-        match c {
-            Put(key, value) => {
-                let hash_table_res = ht_arc.insert_if_absent(key, value);
-                let resp = match hash_table_res {
-                    LockFail => NegAck,
-                    Type(b) => PutAck(b),
-                };
-//               println!("{} Response: {:?}", thread::current().name().unwrap(), resp);
-                to_writer(&mut s, &resp)
-                    .expect("Could not write Put result");
-            },
-            Get(key) => {
-                let hash_table_res = ht_arc.get(&key);
-                let resp = match hash_table_res {
-                    LockFail => NegAck,
-                    Type(o) => GetAck(o),
-                };
-//                println!("{} Response: {:?}", thread::current().name().unwrap(), resp);
-                to_writer(&mut s, &resp)
-                    .expect("Could not write Get result");
-            },
-        }
-    }
+    use crate::transport::{Command, KeyType, ValueType};
+    use crate::transport::Command::{Put, Get};
+    use crate::transport::CommandResponse::{NegAck, PutAck, GetAck};
+    use std::hash::{Hash, Hasher};
 
     // TODO: Make generic for real...
     #[allow(dead_code)]
@@ -274,8 +215,9 @@ pub mod parallel {
         }
 
         fn compute_bucket(&self, key: &KeyType) -> usize {
-            // We consistent hashing gives us contiguous ranges like [0, 1, 2, 3]
-            *key as usize % self.num_buckets
+            let mut hasher = std::collections::hash_map::DefaultHasher::new();
+            key.hash(&mut hasher);
+            (hasher.finish() % self.num_buckets as u64) as usize
         }
     }
 }
@@ -314,5 +256,86 @@ pub mod settings {
         let key_range = config.get_int("key_range")?;
 
         Ok((client_ips, server_ips, num_ops as u32, key_range as u32))
+    }
+}
+
+pub mod transport {
+    use serde::{Serialize, Deserialize};
+
+    // This entire class is only really client side.
+    // Is there anything I can do server side ?
+    // I'll need to handle a connection pool there also.
+
+    pub type KeyType = String;
+    pub type ValueType = String;    // TODO: Should be Any (Or equivalent)
+
+    #[derive(Serialize, Deserialize, Debug)]
+    pub enum Command {
+        Put(KeyType, ValueType),
+        Get(KeyType),
+    }
+
+    #[derive(Serialize, Deserialize, Debug)]
+    pub enum CommandResponse {
+        PutAck(bool),
+        GetAck(Option<ValueType>),
+        NegAck,
+    }
+
+
+    // manage as many connections as we have servers (per client).
+    // The metrics will also be taken on the server, so I can clean up the client functions a lot.
+
+    use std::net::TcpStream;
+    use rand::{thread_rng, Rng};
+    use std::time::Duration;
+    use std::thread;
+    use serde_json::{to_writer, Deserializer};
+    use crate::transport::CommandResponse::{PutAck, NegAck};
+    use serde_json::de::IoRead;
+
+    struct Transport<'a> {
+        // node_ips & key_range
+        // used to create a mapping
+        node_ips: Vec<String>,
+        key_range: u32,
+        // Vec<TcpStream> server connections.
+        streams: Vec<TcpStream>,
+    }
+
+    impl Transport {
+        fn new(node_ips: Vec<String>, key_range: u32) -> Transport {
+            let streams = node_ips.iter()
+                .map(|s| TcpStream::connect(s).unwrap())
+                .collect();
+            // let cr_deserializers = streams.iter()
+            //     .map(|s| serde_json::Deserializer::from_reader(&mut s))
+            //     .collect();
+            Transport { node_ips, key_range, streams, }
+        }
+
+        fn put(&self, key: KeyType, value: ValueType) {
+
+            let c = Command::Put(key, value);
+            // FIXME: This is gross, and relies on the fact that generating key is exclusive of key_range
+            let index: usize = ((key as f64 / key_range as f64) * server_ips.len() as f64) as usize;
+            let mut stream = self.streams.get(index).unwrap();
+            let mut retries = 0;
+
+            loop {
+                to_writer(&mut stream, &c).expect("Unable to write Command");
+                // TODO: Move into struct. Is it possible ?
+                let mut de = serde_json::Deserializer::from_reader(&mut stream);
+                let cr = CommandResponse::deserialize(&mut de)
+                    .expect("Could not deserialize command response.");
+                match cr {
+                    PutAck(b) => break,    // This returns
+                    NegAck => retries += 1,
+                    _ => eprintln!("Received unexpected command response"),
+                }
+                // random Exponential backoff
+                thread::sleep(Duration::from_micros(thread_rng().gen_range(0, 2u32.pow(retries)) as u64))
+            }
+        }
     }
 }
