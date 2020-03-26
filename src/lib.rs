@@ -215,9 +215,8 @@ pub mod parallel {
         }
 
         fn compute_bucket(&self, key: &KeyType) -> usize {
-            let mut hasher = std::collections::hash_map::DefaultHasher::new();
-            key.hash(&mut hasher);
-            (hasher.finish() % self.num_buckets as u64) as usize
+            // We consistent hashing gives us contiguous ranges like [0, 1, 2, 3]
+            *key as usize % self.num_buckets
         }
     }
 }
@@ -266,7 +265,7 @@ pub mod transport {
     // Is there anything I can do server side ?
     // I'll need to handle a connection pool there also.
 
-    pub type KeyType = String;
+    pub type KeyType = u32;
     pub type ValueType = String;    // TODO: Should be Any (Or equivalent)
 
     #[derive(Serialize, Deserialize, Debug)]
