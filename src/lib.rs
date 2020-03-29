@@ -17,6 +17,7 @@ pub mod protocol {
     pub enum Command {
         Put(KeyType, ValueType),
         Get(KeyType),
+        Exit,
     }
 
     #[derive(Serialize, Deserialize, Debug)]

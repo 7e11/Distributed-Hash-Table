@@ -52,6 +52,9 @@ fn main() {
         thread::sleep(Duration::from_micros(thread_rng().gen_range(0, 100) as u64))
     }
 
+    // Send the exit command to server.
+    write_command(&Command::Exit, &String::from("127.0.0.1:40480"));
+
     let duration = start.elapsed().as_millis();
 
     println!();

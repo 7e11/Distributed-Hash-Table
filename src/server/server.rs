@@ -3,11 +3,11 @@ use std::collections::{HashMap};
 use serde_json::{to_writer};
 
 use cse403_distributed_hash_table::protocol::{Command, barrier};
-use cse403_distributed_hash_table::protocol::Command::{Get, Put};
+use cse403_distributed_hash_table::protocol::Command::{Get, Put, Exit};
 use serde::Deserialize;
 use std::path::Path;
 use config::{ConfigError};
-use cse403_distributed_hash_table::protocol::CommandResponse::{GetAck, PutAck};
+use cse403_distributed_hash_table::protocol::CommandResponse::{GetAck, PutAck, NegAck};
 use cse403_distributed_hash_table::settings::parse_ips;
 
 
@@ -69,6 +69,11 @@ fn application_listener(listener: TcpListener) {
                         to_writer(&mut stream, &GetAck(opt))
                             .expect("Could not write Get result");
                     },
+                    Exit => {
+                        // done receiving. Need some way to exit.
+                        to_writer(&mut stream, &NegAck).unwrap();
+                        break;
+                    }
                 }
             },
         }
