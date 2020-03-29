@@ -1,15 +1,13 @@
 use std::net::{TcpStream, TcpListener};
-use serde_json::{to_writer, from_reader};
+use serde_json::{to_writer};
 use rand::distributions::{Bernoulli, Distribution};
 use rand::{thread_rng, Rng};
 use std::time::{Instant, Duration};
-
-use cse403_distributed_hash_table::barrier::{Command, KeyType, ValueType, barrier, CommandResponse};
-use cse403_distributed_hash_table::barrier::CommandResponse::{PutAck, GetAck, NegAck};
 use std::thread;
 use cse403_distributed_hash_table::settings::{parse_settings};
-use std::hash::{Hash, Hasher};
-
+use cse403_distributed_hash_table::barrier::barrier;
+use cse403_distributed_hash_table::transport::{KeyType, ValueType, Command, CommandResponse};
+use serde::de::Deserialize;
 
 fn main() {
     let (client_ips, server_ips, num_ops, key_range) = parse_settings()
@@ -21,6 +19,15 @@ fn main() {
     barrier(barrier_ips, &listener);
     println!("Client passed barrier");
 
+    // Open a stream for each server.
+    let streams = server_ips.iter()
+        .map(|ip| {
+            let stream = TcpStream::connect(ip).expect("Unable to connect");
+            stream
+        })
+        .collect();
+
+
     let (mut put_success, mut put_fail, mut get_success, mut get_fail, mut neg_ack) = (0, 0, 0, 0, 0);
     let do_put_dist = Bernoulli::from_ratio(4, 10).unwrap();
     let start = Instant::now();
@@ -29,7 +36,7 @@ fn main() {
         if do_put_dist.sample(&mut thread_rng()) {
             // 40% chance to do a put
             let (b, neg_ack_incr) = put(thread_rng().gen_range(0, key_range),
-                                        String::from("A"), &server_ips, key_range);
+                                        String::from("A"), &streams, key_range);
             neg_ack += neg_ack_incr;
             match b {
                 true => put_success += 1,
@@ -38,7 +45,7 @@ fn main() {
         } else {
             // 60% chance to do a get
             let (o, neg_ack_incr) = get(thread_rng().gen_range(0, key_range),
-                                &server_ips, key_range);
+                                            &streams, key_range);
             neg_ack += neg_ack_incr;
             match o {
                 Some(_) => get_success += 1,
@@ -47,6 +54,11 @@ fn main() {
         }
         // Think Time (Not necessary for closed loop)
 //        thread::sleep(Duration::from_micros(thread_rng().gen_range(0, 100) as u64))
+    }
+
+    // We've finished, send an Exit command to ALL streams to close the server side socket. EOF will crash the server.
+    for stream in streams {
+        to_writer(stream, &Command::Exit).unwrap();
     }
 
     let duration = start.elapsed().as_millis();
@@ -63,42 +75,50 @@ fn main() {
     println!();
 }
 
-fn put(key: KeyType, value: ValueType, node_ips: &Vec<String>, key_range: u32) -> (bool, u32) {
+fn put(key: KeyType, value: ValueType, streams: &Vec<TcpStream>, key_range: u32) -> (bool, u32) {
     // Returns the result of the put, and the number of retries as a tuple.
 
     let c = Command::Put(key, value);
-    let server_ip = map_server_ip(key, node_ips, key_range);
+    let index: usize = ((key as f64 / key_range as f64) * streams.len() as f64) as usize;
+    let stream = streams.get(index).unwrap();
+    // let mut de = serde_json::Deserializer::from_reader( stream);
     let mut retries = 0;
 
-    // TODO: Keep the socket open between retries (?)
     loop {
-        let cr: CommandResponse = write_command(&c, server_ip);
+        to_writer(stream, &c).expect("Unable to write Command");
+        // let mut de = serde_json::Deserializer::from_reader( &mut stream);
+        let mut de = serde_json::Deserializer::from_reader( stream);
+        let cr = CommandResponse::deserialize(&mut de).unwrap();
         match cr {
-            PutAck(b) => break (b, retries),    // This returns
-            NegAck => retries += 1,
+            CommandResponse::PutAck(b) => break (b, retries),    // This returns
+            CommandResponse::NegAck => retries += 1,
             _ => println!("Received unexpected response"),
         }
         // Exponential backoff
-        thread::sleep(Duration::from_micros(thread_rng().gen_range(0, 2u32.pow(retries)) as u64))
+        thread::sleep(Duration::from_micros(thread_rng().gen_range(0, 2u32.pow(retries)) as u64));
     }
 }
 
-fn get(key: KeyType, node_ips: &Vec<String>, key_range: u32) -> (Option<ValueType>, u32) {
+fn get(key: KeyType, streams: &Vec<TcpStream>, key_range: u32) -> (Option<ValueType>, u32) {
     // Returns the result of the put, and the number of retries as a tuple.
 
     let c = Command::Get(key);
-    let server_ip = map_server_ip(key, node_ips, key_range);
+    let index: usize = ((key as f64 / key_range as f64) * streams.len() as f64) as usize;
+    let stream = streams.get(index).unwrap();
+    // let mut de = serde_json::Deserializer::from_reader( stream);
     let mut retries = 0;
 
-    // TODO: Keep the socket open between retries (?)
     loop {
-        let cr: CommandResponse = write_command(&c, server_ip);
+        to_writer(stream, &c).expect("Unable to write Command");
+        // let mut de = serde_json::Deserializer::from_reader( &mut stream);
+        let mut de = serde_json::Deserializer::from_reader( stream);
+        let cr = CommandResponse::deserialize(&mut de).unwrap();
         match cr {
-            GetAck(o) => break (o, retries),    // This returns
-            NegAck => retries += 1,
+            CommandResponse::GetAck(o) => break (o, retries),    // This returns
+            CommandResponse::NegAck => retries += 1,
             _ => println!("Received unexpected response"),
         }
         // Exponential backoff
-        thread::sleep(Duration::from_micros(thread_rng().gen_range(0, 2u32.pow(retries)) as u64))
+        thread::sleep(Duration::from_micros(thread_rng().gen_range(0, 2u32.pow(retries)) as u64));
     }
 }

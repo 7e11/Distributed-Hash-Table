@@ -79,19 +79,9 @@ pub mod barrier {
 }
 
 pub mod parallel {
-    use std::sync::{RwLock, Mutex, Arc, Condvar};
-    use crate::barrier::{KeyType, ValueType, Command};
+    use std::sync::{RwLock, Mutex};
     use crate::parallel::LockCheck::{LockFail, Type};
-    use std::collections::VecDeque;
-    use std::net::TcpStream;
-    use crate::barrier::Command::{Put, Get};
-    use serde_json::to_writer;
-    use crate::barrier::CommandResponse::{NegAck, PutAck, GetAck};
-    use serde::Deserialize;
-    use crate::transport::{Command, KeyType, ValueType};
-    use crate::transport::Command::{Put, Get};
-    use crate::transport::CommandResponse::{NegAck, PutAck, GetAck};
-    use std::hash::{Hash, Hasher};
+    use crate::transport::{KeyType, ValueType};
 
     // TODO: Make generic for real...
     #[allow(dead_code)]
@@ -272,6 +262,7 @@ pub mod transport {
     pub enum Command {
         Put(KeyType, ValueType),
         Get(KeyType),
+        Exit,
     }
 
     #[derive(Serialize, Deserialize, Debug)]
@@ -279,62 +270,5 @@ pub mod transport {
         PutAck(bool),
         GetAck(Option<ValueType>),
         NegAck,
-    }
-
-
-    // manage as many connections as we have servers (per client).
-    // The metrics will also be taken on the server, so I can clean up the client functions a lot.
-
-    use std::net::TcpStream;
-    use rand::{thread_rng, Rng};
-    use std::time::Duration;
-    use std::thread;
-    use serde_json::{to_writer, Deserializer};
-    use crate::transport::CommandResponse::{PutAck, NegAck};
-    use serde_json::de::IoRead;
-
-    struct Transport<'a> {
-        // node_ips & key_range
-        // used to create a mapping
-        node_ips: Vec<String>,
-        key_range: u32,
-        // Vec<TcpStream> server connections.
-        streams: Vec<TcpStream>,
-    }
-
-    impl Transport {
-        fn new(node_ips: Vec<String>, key_range: u32) -> Transport {
-            let streams = node_ips.iter()
-                .map(|s| TcpStream::connect(s).unwrap())
-                .collect();
-            // let cr_deserializers = streams.iter()
-            //     .map(|s| serde_json::Deserializer::from_reader(&mut s))
-            //     .collect();
-            Transport { node_ips, key_range, streams, }
-        }
-
-        fn put(&self, key: KeyType, value: ValueType) {
-
-            let c = Command::Put(key, value);
-            // FIXME: This is gross, and relies on the fact that generating key is exclusive of key_range
-            let index: usize = ((key as f64 / key_range as f64) * server_ips.len() as f64) as usize;
-            let mut stream = self.streams.get(index).unwrap();
-            let mut retries = 0;
-
-            loop {
-                to_writer(&mut stream, &c).expect("Unable to write Command");
-                // TODO: Move into struct. Is it possible ?
-                let mut de = serde_json::Deserializer::from_reader(&mut stream);
-                let cr = CommandResponse::deserialize(&mut de)
-                    .expect("Could not deserialize command response.");
-                match cr {
-                    PutAck(b) => break,    // This returns
-                    NegAck => retries += 1,
-                    _ => eprintln!("Received unexpected command response"),
-                }
-                // random Exponential backoff
-                thread::sleep(Duration::from_micros(thread_rng().gen_range(0, 2u32.pow(retries)) as u64))
-            }
-        }
     }
 }
