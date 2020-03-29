@@ -14,10 +14,11 @@ from pathlib import Path, PurePath, PurePosixPath
 from threading import Thread
 import os
 
+# FIXME: Temporary thing while I'm just working on one node.
 nodes = [
     'evan@40.117.213.2:22',
-    'evan@40.117.212.129:22',
-    'evan@40.117.214.137:22',
+    # 'evan@40.117.212.129:22',
+    # 'evan@40.117.214.137:22',
 ]
 
 transfer_files = [

@@ -41,14 +41,14 @@ fn main() {
             .expect("Could't spawn thread"));
     }
 
-    // I want some way to join only if ALL threads are done.
-    // Take statistics, when the atomic int is done, print it.
-    while threads_complete.load(Ordering::Relaxed) < listen_threads.len() as u32 {
-        // Take statistics, maybe just a counter of operations for now?
-        // Should i keep track of time as well?
-
-        thread::sleep(Duration::from_millis(50));
-    }
+    // // I want some way to join only if ALL threads are done.
+    // // Take statistics, when the atomic int is done, print it.
+    // while threads_complete.load(Ordering::Relaxed) < listen_threads.len() as u32 {
+    //     // Take statistics, maybe just a counter of operations for now?
+    //     // Should i keep track of time as well?
+    //
+    //     thread::sleep(Duration::from_millis(50));
+    // }
     // Join on those threads, should work instantly b/c they all should be done.
     for jh in listen_threads {
         jh.join().unwrap();
@@ -63,7 +63,7 @@ fn listen_stream(cht: Arc<ConcurrentHashTable>, stream: TcpStream, counter: Arc<
         // Deserialize from stream https://github.com/serde-rs/json/issues/522
         let mut de = serde_json::Deserializer::from_reader(&stream);
         let c = Command::deserialize(&mut de).expect("Could not deserialize command.");
-        println!("{} Received: {:?} From {:?}", thread::current().name().unwrap(), c, stream);
+        // println!("{} Received: {:?} From {:?}", thread::current().name().unwrap(), c, stream);
         match c {
             Command::Put(key, value) => {
                 let hash_table_res = cht.insert_if_absent(key, value);
@@ -71,7 +71,7 @@ fn listen_stream(cht: Arc<ConcurrentHashTable>, stream: TcpStream, counter: Arc<
                     LockCheck::LockFail => CommandResponse::NegAck,
                     LockCheck::Type(b) => CommandResponse::PutAck(b),
                 };
-                println!("{} Response: {:?}", thread::current().name().unwrap(), resp);
+                // println!("{} Response: {:?}", thread::current().name().unwrap(), resp);
                 // TODO: Why doesn't this need to be mutable?
                 to_writer(&stream, &resp)
                     .expect("Could not write Put result");
@@ -82,7 +82,7 @@ fn listen_stream(cht: Arc<ConcurrentHashTable>, stream: TcpStream, counter: Arc<
                     LockCheck::LockFail => CommandResponse::NegAck,
                     LockCheck::Type(o) => CommandResponse::GetAck(o),
                 };
-                println!("{} Response: {:?}", thread::current().name().unwrap(), resp);
+                // println!("{} Response: {:?}", thread::current().name().unwrap(), resp);
                 to_writer(&stream, &resp)
                     .expect("Could not write Get result");
             },
