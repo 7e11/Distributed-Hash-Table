@@ -1,4 +1,4 @@
 pkill -x server
 pkill -x client
-cargo run --bin server --release &
-cargo run --bin client --release
+cargo run --bin server &
+cargo run --bin client

@@ -58,7 +58,8 @@ fn main() {
 
     // We've finished, send an Exit command to ALL streams to close the server side socket. EOF will crash the server.
     for stream in streams {
-        to_writer(stream, &Command::Exit).unwrap();
+        // to_writer(stream, &Command::Exit).unwrap();
+        bincode::serialize_into(stream, &Command::Exit).unwrap();
     }
 
     let duration = start.elapsed().as_millis();
@@ -80,15 +81,15 @@ fn put(key: KeyType, value: ValueType, streams: &Vec<TcpStream>, key_range: u32)
 
     let c = Command::Put(key, value);
     let index: usize = ((key as f64 / key_range as f64) * streams.len() as f64) as usize;
-    let stream = streams.get(index).unwrap();
-    // let mut de = serde_json::Deserializer::from_reader( stream);
+    let stream_ref = streams.get(index).unwrap();
     let mut retries = 0;
 
     loop {
-        to_writer(stream, &c).expect("Unable to write Command");
-        // let mut de = serde_json::Deserializer::from_reader( &mut stream);
-        let mut de = serde_json::Deserializer::from_reader( stream);
-        let cr = CommandResponse::deserialize(&mut de).unwrap();
+        // to_writer(stream, &c).expect("Unable to write Command");
+        bincode::serialize_into(stream_ref, &c).expect("Unable to write Command");
+        // let mut de = serde_json::Deserializer::from_reader( stream);
+        // let cr = CommandResponse::deserialize(&mut de).unwrap();
+        let cr = bincode::deserialize_from(stream_ref).unwrap();
         match cr {
             CommandResponse::PutAck(b) => break (b, retries),    // This returns
             CommandResponse::NegAck => retries += 1,
@@ -104,15 +105,15 @@ fn get(key: KeyType, streams: &Vec<TcpStream>, key_range: u32) -> (Option<ValueT
 
     let c = Command::Get(key);
     let index: usize = ((key as f64 / key_range as f64) * streams.len() as f64) as usize;
-    let stream = streams.get(index).unwrap();
-    // let mut de = serde_json::Deserializer::from_reader( stream);
+    let stream_ref = streams.get(index).unwrap();
     let mut retries = 0;
 
     loop {
-        to_writer(stream, &c).expect("Unable to write Command");
-        // let mut de = serde_json::Deserializer::from_reader( &mut stream);
-        let mut de = serde_json::Deserializer::from_reader( stream);
-        let cr = CommandResponse::deserialize(&mut de).unwrap();
+        // to_writer(stream, &c).expect("Unable to write Command");
+        bincode::serialize_into(stream_ref, &c).expect("Unable to write Command");
+        // let mut de = serde_json::Deserializer::from_reader( stream);
+        // let cr = CommandResponse::deserialize(&mut de).unwrap();
+        let cr = bincode::deserialize_from(stream_ref).unwrap();
         match cr {
             CommandResponse::GetAck(o) => break (o, retries),    // This returns
             CommandResponse::NegAck => retries += 1,

@@ -12,13 +12,28 @@
 from fabric import Connection, ThreadingGroup as Group
 from pathlib import Path, PurePath, PurePosixPath
 from threading import Thread
+from fabric.config import Config
 import os
 
 # FIXME: Temporary thing while I'm just working on one node.
+
+# user = 'evan'
+user = 'ec2-user'
+
+# nodes = [
+#     '40.117.213.2:22',
+#     # '40.117.212.129:22',
+#     # '40.117.214.137:22',
+# ]
+
+# Changes on every restart
 nodes = [
-    'evan@40.117.213.2:22',
-    # 'evan@40.117.212.129:22',
-    # 'evan@40.117.214.137:22',
+    # '3.15.166.51',
+    # '3.21.230.182',
+    # '18.224.19.58',
+    # '18.218.63.183',
+    # '3.135.229.178',
+    '3.132.215.238',    # t2.2xlarge, delete when test is done.
 ]
 
 transfer_files = [
@@ -31,17 +46,33 @@ transfer_files = [
     # Path('test.sh'),
 ]
 
+def configure_group(hosts):
+    connections = []
+    for host in hosts:
+        connections.append(
+            Connection(host=host,
+                       user=user,
+                       connect_kwargs={'key_filename': 'C:\\Users\\Evan.Evan-Desktop\\.ssh\\dht-aws-key.pem'}))
+    group = Group.from_connections(connections)
+    return group
+
 def deploy(group):
     # Put isn't supported on groups yet, do it on each individual connection
     # https://github.com/fabric/fabric/issues/1810
+    # Make sure the required directories exist in each server.
+    group.run('mkdir -p /home/' + user + '/dht/src/client')
+    group.run('mkdir -p /home/' + user + '/dht/src/server')
     for connection in group:
-        connection.cd
         # Can't transfer entire directories, transfer one file at a time.
         for path in transfer_files:
-            connection.put(path, '/home/evan/dht/' + path.as_posix())
+            connection.put(path, '/home/' + user + '/dht/' + path.as_posix())
+
+def install(group):
+    group.run('sudo yum -y groupinstall \"Development Tools\"')     # ec2 doesn't have apt
+    group.run('curl --proto \'=https\' --tlsv1.2 -sSf https://sh.rustup.rs | sh -s -- -y')
 
 def update(group):
-    group.run("/home/evan/.cargo/bin/rustup update")
+    group.run('/home/' + user + '/.cargo/bin/rustup update')
 
 def kill(group):
     group.run("pkill -x server")
@@ -51,13 +82,13 @@ def run_client(group):
     # Need to chain cd
     # https://github.com/fabric/fabric/issues/1862
     # This will need to be asynchronous in the future, when we start taking statistics on the server.
-    group.run("cd dht && /home/evan/.cargo/bin/cargo run --bin client --release")
+    group.run('cd dht && /home/' + user + '/.cargo/bin/cargo run --bin client --release')
 
 def run_server(group, sockname='dtach'):
-    cmd = '/home/evan/.cargo/bin/cargo run --bin server --release'
+    cmd = '/home/' + user + '/.cargo/bin/cargo run --bin server --release'
     # cmd = '/home/evan/.cargo/bin/cargo run --bin server --release --manifest-path /home/evan/dht/Cargo.toml'
     for conn in group:
-        conn.run('cd /home/evan/dht && dtach -n `mktemp -u /tmp/%s.XXXX` %s' % (sockname, cmd))
+        conn.run('cd /home/' + user + '/dht && dtach -n `mktemp -u /tmp/%s.XXXX` %s' % (sockname, cmd))
         # background_run(conn, cmd)
 
 def background_run(connection, command):
@@ -69,16 +100,18 @@ if __name__ == '__main__':
     # Have the server group be thread managed.
     # This doesn't parallelize, only allows for concurrency.
     def server_operations():
-        server_group = Group(*nodes)
+        server_group = configure_group(nodes)
         # kill(server_group)
         deploy(server_group)
-        server_group.run('cd /home/evan/dht && /home/evan/.cargo/bin/cargo run --bin server --release')
+        server_group.run('cd /home/' + user + '/dht && /home/' + user + '/.cargo/bin/cargo run --bin server')
     server_group_thread = Thread(target=server_operations)
     # server_group_thread.start()
 
-    client_group = Group(*nodes)
+    client_group = configure_group(nodes)
     # kill(client_group)
+    # install(client_group)
     deploy(client_group)
-    # client_group.run("cd /home/evan/dht && /home/evan/.cargo/bin/cargo run --bin client --release")
+
+    # client_group.run('cd /home/' + user + '/dht && /home/' + user + '/.cargo/bin/cargo run --bin client')
 
     # server_group_thread.join()

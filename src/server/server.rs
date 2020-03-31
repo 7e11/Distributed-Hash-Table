@@ -61,9 +61,10 @@ fn listen_stream(cht: Arc<ConcurrentHashTable>, stream: TcpStream, counter: Arc<
     // let mut de = serde_json::Deserializer::from_reader(&stream);
     loop {
         // Deserialize from stream https://github.com/serde-rs/json/issues/522
-        let mut de = serde_json::Deserializer::from_reader(&stream);
-        let c = Command::deserialize(&mut de).expect("Could not deserialize command.");
-        // println!("{} Received: {:?} From {:?}", thread::current().name().unwrap(), c, stream);
+        // let mut de = serde_json::Deserializer::from_reader(&stream);
+        // let c = Command::deserialize(&mut de).expect("Could not deserialize command.");
+        let c = bincode::deserialize_from(&stream).unwrap();
+        println!("{} Received: {:?}", thread::current().name().unwrap(), c);
         match c {
             Command::Put(key, value) => {
                 let hash_table_res = cht.insert_if_absent(key, value);
@@ -73,8 +74,8 @@ fn listen_stream(cht: Arc<ConcurrentHashTable>, stream: TcpStream, counter: Arc<
                 };
                 // println!("{} Response: {:?}", thread::current().name().unwrap(), resp);
                 // TODO: Why doesn't this need to be mutable?
-                to_writer(&stream, &resp)
-                    .expect("Could not write Put result");
+                // to_writer(&stream, &resp).expect("Could not write Put result");
+                bincode::serialize_into(&stream, &resp).expect("Could not write Put result");
             },
             Command::Get(key) => {
                 let hash_table_res = cht.get(&key);
@@ -83,8 +84,8 @@ fn listen_stream(cht: Arc<ConcurrentHashTable>, stream: TcpStream, counter: Arc<
                     LockCheck::Type(o) => CommandResponse::GetAck(o),
                 };
                 // println!("{} Response: {:?}", thread::current().name().unwrap(), resp);
-                to_writer(&stream, &resp)
-                    .expect("Could not write Get result");
+                // to_writer(&stream, &resp).expect("Could not write Get result");
+                bincode::serialize_into(&stream, &resp).expect("Could not write Get result");
             },
             Command::Exit => {
                 // Signals that we're done, and that we should collect the stream.
