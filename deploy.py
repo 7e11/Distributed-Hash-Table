@@ -28,12 +28,11 @@ user = 'ec2-user'
 
 # Changes on every restart
 nodes = [
-    # '3.15.166.51',
+    '18.222.91.233',
     # '3.21.230.182',
     # '18.224.19.58',
     # '18.218.63.183',
     # '3.135.229.178',
-    '3.132.215.238',    # t2.2xlarge, delete when test is done.
 ]
 
 transfer_files = [
@@ -99,19 +98,19 @@ if __name__ == '__main__':
     # One thread for managing the client ThreadedGroup, and another for the server ThreadedGroup
     # Have the server group be thread managed.
     # This doesn't parallelize, only allows for concurrency.
-    def server_operations():
-        server_group = configure_group(nodes)
-        # kill(server_group)
-        deploy(server_group)
-        server_group.run('cd /home/' + user + '/dht && /home/' + user + '/.cargo/bin/cargo run --bin server')
-    server_group_thread = Thread(target=server_operations)
-    # server_group_thread.start()
 
     client_group = configure_group(nodes)
     # kill(client_group)
     # install(client_group)
     deploy(client_group)
 
-    # client_group.run('cd /home/' + user + '/dht && /home/' + user + '/.cargo/bin/cargo run --bin client')
+    def server_operations():
+        server_group = configure_group(nodes)
+        # kill(server_group)
+        # deploy(server_group)
+        server_group.run('cd /home/' + user + '/dht && /home/' + user + '/.cargo/bin/cargo run --bin server')
+    server_group_thread = Thread(target=server_operations)
+    server_group_thread.start()
 
-    # server_group_thread.join()
+    client_group.run('cd /home/' + user + '/dht && /home/' + user + '/.cargo/bin/cargo run --bin client')
+    server_group_thread.join()

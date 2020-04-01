@@ -10,7 +10,7 @@ use cse403_distributed_hash_table::parallel::LockCheck;
 use cse403_distributed_hash_table::transport::CommandResponse;
 use serde_json::to_writer;
 use serde::de::Deserialize;
-use std::time::Duration;
+use std::time::{Duration, Instant};
 
 fn main() {
     let (client_ips, server_ips, _, key_range) = parse_settings()
@@ -35,6 +35,8 @@ fn main() {
         let cht_clone = cht.clone();
         let counter_clone = threads_complete.clone();
 
+        println!("Spawning server thread: [listener {} | {}]", i, addr);
+
         listen_threads.push(thread::Builder::new()
             .name(format!("[listener {} | {}]", i, addr))
             .spawn(move || listen_stream(cht_clone, stream, counter_clone))
@@ -50,6 +52,7 @@ fn main() {
     //     thread::sleep(Duration::from_millis(50));
     // }
     // Join on those threads, should work instantly b/c they all should be done.
+    println!("Server done accepting connections, joining on listening threads");
     for jh in listen_threads {
         jh.join().unwrap();
     }
@@ -58,13 +61,10 @@ fn main() {
 }
 
 fn listen_stream(cht: Arc<ConcurrentHashTable>, stream: TcpStream, counter: Arc<AtomicU32>) -> () {
-    // let mut de = serde_json::Deserializer::from_reader(&stream);
     loop {
-        // Deserialize from stream https://github.com/serde-rs/json/issues/522
-        // let mut de = serde_json::Deserializer::from_reader(&stream);
-        // let c = Command::deserialize(&mut de).expect("Could not deserialize command.");
         let c = bincode::deserialize_from(&stream).unwrap();
-        println!("{} Received: {:?}", thread::current().name().unwrap(), c);
+        let timer = Instant::now();
+        // println!("{} Received: {:?}", thread::current().name().unwrap(), c);
         match c {
             Command::Put(key, value) => {
                 let hash_table_res = cht.insert_if_absent(key, value);
@@ -74,7 +74,7 @@ fn listen_stream(cht: Arc<ConcurrentHashTable>, stream: TcpStream, counter: Arc<
                 };
                 // println!("{} Response: {:?}", thread::current().name().unwrap(), resp);
                 // TODO: Why doesn't this need to be mutable?
-                // to_writer(&stream, &resp).expect("Could not write Put result");
+                // println!("{} Blocking after {} ms", thread::current().name().unwrap(), timer.elapsed().as_millis());
                 bincode::serialize_into(&stream, &resp).expect("Could not write Put result");
             },
             Command::Get(key) => {
@@ -84,14 +84,14 @@ fn listen_stream(cht: Arc<ConcurrentHashTable>, stream: TcpStream, counter: Arc<
                     LockCheck::Type(o) => CommandResponse::GetAck(o),
                 };
                 // println!("{} Response: {:?}", thread::current().name().unwrap(), resp);
-                // to_writer(&stream, &resp).expect("Could not write Get result");
+                // println!("{} Blocking after {} ms", thread::current().name().unwrap(), timer.elapsed().as_millis());
                 bincode::serialize_into(&stream, &resp).expect("Could not write Get result");
             },
             Command::Exit => {
                 // Signals that we're done, and that we should collect the stream.
                 // Maybe increment an AtomicInt in the statistics thread which keeps track of the number of
                 // Threads which have terminated.
-                counter.fetch_add(1, Ordering::Relaxed); // Is this ordering OK?
+                // counter.fetch_add(1, Ordering::Relaxed); // Is this ordering OK?
                 break;
             }
         }

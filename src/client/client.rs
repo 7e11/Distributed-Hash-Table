@@ -53,7 +53,7 @@ fn main() {
             }
         }
         // Think Time (Not necessary for closed loop)
-//        thread::sleep(Duration::from_micros(thread_rng().gen_range(0, 100) as u64))
+       // thread::sleep(Duration::from_micros(thread_rng().gen_range(0, 100) as u64))
     }
 
     // We've finished, send an Exit command to ALL streams to close the server side socket. EOF will crash the server.
@@ -85,11 +85,15 @@ fn put(key: KeyType, value: ValueType, streams: &Vec<TcpStream>, key_range: u32)
     let mut retries = 0;
 
     loop {
-        // to_writer(stream, &c).expect("Unable to write Command");
+        let timer = Instant::now();
+        println!("Client serializing {:?}", c);
+
         bincode::serialize_into(stream_ref, &c).expect("Unable to write Command");
-        // let mut de = serde_json::Deserializer::from_reader( stream);
-        // let cr = CommandResponse::deserialize(&mut de).unwrap();
+        println!("Client serialized, about to deserialize {}", timer.elapsed().as_millis());
         let cr = bincode::deserialize_from(stream_ref).unwrap();
+
+        println!("Client got response after {} ms", timer.elapsed().as_millis());
+
         match cr {
             CommandResponse::PutAck(b) => break (b, retries),    // This returns
             CommandResponse::NegAck => retries += 1,
@@ -109,11 +113,15 @@ fn get(key: KeyType, streams: &Vec<TcpStream>, key_range: u32) -> (Option<ValueT
     let mut retries = 0;
 
     loop {
-        // to_writer(stream, &c).expect("Unable to write Command");
+        let timer = Instant::now();
+        println!("Client serializing {:?}", c);
+
         bincode::serialize_into(stream_ref, &c).expect("Unable to write Command");
-        // let mut de = serde_json::Deserializer::from_reader( stream);
-        // let cr = CommandResponse::deserialize(&mut de).unwrap();
+        println!("Client serialized, about to deserialize {}", timer.elapsed().as_millis());
         let cr = bincode::deserialize_from(stream_ref).unwrap();
+
+        println!("Client got response after {} ms", timer.elapsed().as_millis());
+
         match cr {
             CommandResponse::GetAck(o) => break (o, retries),    // This returns
             CommandResponse::NegAck => retries += 1,
