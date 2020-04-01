@@ -5,12 +5,13 @@ use std::sync::{Arc, Mutex, Condvar};
 use std::sync::atomic::{AtomicU32, Ordering};
 use std::thread;
 use cse403_distributed_hash_table::parallel::{ConcurrentHashTable};
-use cse403_distributed_hash_table::transport::Command;
+use cse403_distributed_hash_table::transport::{Command, buffered_serialize_into};
 use cse403_distributed_hash_table::parallel::LockCheck;
 use cse403_distributed_hash_table::transport::CommandResponse;
 use serde_json::to_writer;
 use serde::de::Deserialize;
 use std::time::{Duration, Instant};
+use std::io::Read;
 
 fn main() {
     let (client_ips, server_ips, _, key_range) = parse_settings()
@@ -22,7 +23,7 @@ fn main() {
     // Consume both vectors.
     let barrier_ips = client_ips.into_iter().chain(server_ips.into_iter()).collect();
     barrier(barrier_ips, &listener);
-    println!("Server passed barrier");
+    // println!("Server passed barrier");
 
     let threads_complete = Arc::new(AtomicU32::new(0));
     let cht =
@@ -35,7 +36,7 @@ fn main() {
         let cht_clone = cht.clone();
         let counter_clone = threads_complete.clone();
 
-        println!("Spawning server thread: [listener {} | {}]", i, addr);
+        // println!("Spawning server thread: [listener {} | {}]", i, addr);
 
         listen_threads.push(thread::Builder::new()
             .name(format!("[listener {} | {}]", i, addr))
@@ -52,15 +53,15 @@ fn main() {
     //     thread::sleep(Duration::from_millis(50));
     // }
     // Join on those threads, should work instantly b/c they all should be done.
-    println!("Server done accepting connections, joining on listening threads");
+    // println!("Server done accepting connections, joining on listening threads");
     for jh in listen_threads {
         jh.join().unwrap();
     }
     // Print statistics.
-    println!("Server complete")
+    // println!("Server complete")
 }
 
-fn listen_stream(cht: Arc<ConcurrentHashTable>, stream: TcpStream, counter: Arc<AtomicU32>) -> () {
+fn listen_stream(cht: Arc<ConcurrentHashTable>, mut stream: TcpStream, counter: Arc<AtomicU32>) -> () {
     loop {
         let c = bincode::deserialize_from(&stream).unwrap();
         let timer = Instant::now();
@@ -75,7 +76,7 @@ fn listen_stream(cht: Arc<ConcurrentHashTable>, stream: TcpStream, counter: Arc<
                 // println!("{} Response: {:?}", thread::current().name().unwrap(), resp);
                 // TODO: Why doesn't this need to be mutable?
                 // println!("{} Blocking after {} ms", thread::current().name().unwrap(), timer.elapsed().as_millis());
-                bincode::serialize_into(&stream, &resp).expect("Could not write Put result");
+                buffered_serialize_into(&stream, &resp).expect("Could not write Put result");
             },
             Command::Get(key) => {
                 let hash_table_res = cht.get(&key);
@@ -85,7 +86,7 @@ fn listen_stream(cht: Arc<ConcurrentHashTable>, stream: TcpStream, counter: Arc<
                 };
                 // println!("{} Response: {:?}", thread::current().name().unwrap(), resp);
                 // println!("{} Blocking after {} ms", thread::current().name().unwrap(), timer.elapsed().as_millis());
-                bincode::serialize_into(&stream, &resp).expect("Could not write Get result");
+                buffered_serialize_into(&stream, &resp).expect("Could not write Get result");
             },
             Command::Exit => {
                 // Signals that we're done, and that we should collect the stream.

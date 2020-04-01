@@ -84,7 +84,6 @@ pub mod parallel {
     use crate::transport::{KeyType, ValueType};
 
     // TODO: Make generic for real...
-    #[allow(dead_code)]
     pub struct ConcurrentHashTable {
         buckets: RwLock<Vec<Mutex<Vec<(KeyType, ValueType)>>>>,
         num_buckets: usize,
@@ -250,6 +249,7 @@ pub mod settings {
 
 pub mod transport {
     use serde::{Serialize, Deserialize};
+    use std::net::TcpStream;
 
     // This entire class is only really client side.
     // Is there anything I can do server side ?
@@ -271,4 +271,39 @@ pub mod transport {
         GetAck(Option<ValueType>),
         NegAck,
     }
+
+    ///Taken from here: https://docs.rs/bincode/1.2.1/src/bincode/lib.rs.html#85
+    /// Will need to make this return the writer back to the caller.
+    pub fn buffered_serialize_into< W, T: ?Sized>(mut writer: W, value: &T) -> std::io::Result<usize>
+    where
+        W: std::io::Write,
+        T: serde::Serialize,
+    {
+        let buffer = bincode::serialize(value).unwrap();
+        writer.write(buffer.as_slice())
+    }
+
+    // ///signature taken from:
+    // /// deserialize_from: https://docs.rs/bincode/1.2.1/src/bincode/lib.rs.html#104
+    // /// deserialize: https://docs.rs/bincode/1.2.1/src/bincode/lib.rs.html#138
+    // pub fn buffered_deserialize_from<'a, R, T>(mut reader: R) -> std::result::Result<T, bincode::Error>
+    //     where
+    //         R: std::io::Read,
+    //         T: serde::de::Deserialize<'a>,
+    // {
+    //     let mut buffer: [u8; 256] = [0; 256];
+    //     reader.read(&mut buffer[..]);   // mutable slice
+    //     bincode::deserialize(&buffer[..])
+    // }
+
+    // For client:
+    // let mut buffer: [u8; 256] = [0; 256];
+    // stream_ref.read(&mut buffer[..]).unwrap();
+    // let cr = bincode::deserialize(&buffer[..]).unwrap();
+
+    // For server:
+    // let mut buffer: [u8; 256] = [0; 256];
+    // stream.read(&mut buffer[..]).unwrap();
+    // let c = bincode::deserialize(&buffer[..]).unwrap();
+
 }
