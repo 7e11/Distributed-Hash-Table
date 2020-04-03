@@ -14,6 +14,7 @@ server_ips:
 #  - 10.0.0.178:40480
 #  - 10.0.0.94:40480
 
-num_ops: 10000
-
-key_range: 1000
+num_ops:              100000
+key_range:            10000
+client_threads:       1
+replication_degree:   0

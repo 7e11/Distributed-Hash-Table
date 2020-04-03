@@ -1,20 +1,18 @@
 use std::net::{TcpListener, TcpStream};
 use cse403_distributed_hash_table::barrier::{barrier};
 use cse403_distributed_hash_table::settings::{parse_settings};
-use std::sync::{Arc, Mutex, Condvar};
+use std::sync::{Arc};
 use std::sync::atomic::{AtomicU32, Ordering};
 use std::thread;
 use cse403_distributed_hash_table::parallel::{ConcurrentHashTable};
 use cse403_distributed_hash_table::transport::{Command, buffered_serialize_into};
 use cse403_distributed_hash_table::parallel::LockCheck;
 use cse403_distributed_hash_table::transport::CommandResponse;
-use serde_json::to_writer;
 use serde::de::Deserialize;
 use std::time::{Duration, Instant};
-use std::io::Read;
 
 fn main() {
-    let (client_ips, server_ips, _, key_range) = parse_settings()
+    let (client_ips, server_ips, _num_ops, key_range, client_threads, replication_degree) = parse_settings()
         .expect("Unable to parse settings");
     let listener = TcpListener::bind(("0.0.0.0", 40480))
         .expect("Unable to bind listener");
@@ -31,7 +29,7 @@ fn main() {
     let mut listen_threads = Vec::new();
 
     // Accept exactly (num_clients * threads_per_client) connections
-    for i in 0..(num_clients * 1) {
+    for i in 0..(num_clients * client_threads as usize) {
         let (stream, addr) = listener.accept().expect("Couldn't accept connection");
         let cht_clone = cht.clone();
         let counter_clone = threads_complete.clone();
@@ -61,21 +59,19 @@ fn main() {
     // println!("Server complete")
 }
 
-fn listen_stream(cht: Arc<ConcurrentHashTable>, mut stream: TcpStream, counter: Arc<AtomicU32>) -> () {
+fn listen_stream(cht: Arc<ConcurrentHashTable>, stream: TcpStream, counter: Arc<AtomicU32>) -> () {
+    let mut buckets_locked = Vec::new();
     loop {
         let c = bincode::deserialize_from(&stream).unwrap();
-        let timer = Instant::now();
         // println!("{} Received: {:?}", thread::current().name().unwrap(), c);
         match c {
             Command::Put(key, value) => {
-                let hash_table_res = cht.insert_if_absent(key, value);
+                let hash_table_res = cht.insert(key, value);
                 let resp = match hash_table_res {
                     LockCheck::LockFail => CommandResponse::NegAck,
                     LockCheck::Type(b) => CommandResponse::PutAck(b),
                 };
                 // println!("{} Response: {:?}", thread::current().name().unwrap(), resp);
-                // TODO: Why doesn't this need to be mutable?
-                // println!("{} Blocking after {} ms", thread::current().name().unwrap(), timer.elapsed().as_millis());
                 buffered_serialize_into(&stream, &resp).expect("Could not write Put result");
             },
             Command::Get(key) => {
@@ -85,15 +81,46 @@ fn listen_stream(cht: Arc<ConcurrentHashTable>, mut stream: TcpStream, counter: 
                     LockCheck::Type(o) => CommandResponse::GetAck(o),
                 };
                 // println!("{} Response: {:?}", thread::current().name().unwrap(), resp);
-                // println!("{} Blocking after {} ms", thread::current().name().unwrap(), timer.elapsed().as_millis());
                 buffered_serialize_into(&stream, &resp).expect("Could not write Get result");
             },
             Command::Exit => {
                 // Signals that we're done, and that we should collect the stream.
                 // Maybe increment an AtomicInt in the statistics thread which keeps track of the number of
                 // Threads which have terminated.
-                // counter.fetch_add(1, Ordering::Relaxed); // Is this ordering OK?
+                counter.fetch_add(1, Ordering::Relaxed); // Is this ordering OK?
                 break;
+            },
+            Command::PutRequest(key) => {
+                // get a real lock in the hash table.
+                let bucket_lock = cht.buckets.get(cht.compute_bucket(&key)).unwrap();
+                let bucket_lock = bucket_lock.try_lock();
+                match bucket_lock {
+                    Err(_) => buffered_serialize_into(&stream, &CommandResponse::VoteNo).unwrap(),
+                    Ok(mutex_guard) => {
+                        buckets_locked.push((key, mutex_guard));
+                        buffered_serialize_into(&stream, &CommandResponse::VoteYes).unwrap()
+                    },
+                };
+            },
+            Command::PutCommit(key, value) => {
+                // do the put operation with the locks we have acquired
+                let buckets_locked_index = buckets_locked.iter().position(|(k, _)| *k == key).unwrap();
+                let (_k, mut bucket) = buckets_locked.remove(buckets_locked_index);
+                let index = bucket.iter().position(|(k, _)| *k == key);
+                if let Some(i) = index {
+                    // The key exists, update it.
+                    let pair = bucket.get_mut(i).unwrap();
+                    pair.1 = value;
+                } else {
+                    // The key doesn't exist yet
+                    bucket.push((key, value));
+                }
+            },
+            Command::PutAbort => {
+                // Dump our entire buckets_locked. After all, we're only saving locks for one thread.
+                // It can only do one put / multiput operation at a time.
+                // All of our saved locks are pushed out of scope.
+                buckets_locked.clear();
             }
         }
     }

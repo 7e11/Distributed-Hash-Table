@@ -11,7 +11,7 @@ use serde::de::Deserialize;
 use std::io::{Read, Write};
 
 fn main() {
-    let (client_ips, server_ips, num_ops, key_range) = parse_settings()
+    let (client_ips, server_ips, num_ops, key_range, client_threads, replication_degree) = parse_settings()
         .expect("Unable to parse settings");
     let listener = TcpListener::bind(("0.0.0.0", 40481))
         .expect("Unable to bind listener");
@@ -22,14 +22,11 @@ fn main() {
 
     // Open a stream for each server.
     let mut streams = server_ips.iter()
-        .map(|ip| {
-            let stream = TcpStream::connect(ip).expect("Unable to connect");
-            stream
-        })
+        .map(|ip| { TcpStream::connect(ip).expect("Unable to connect"); })
         .collect();
 
 
-    let (mut put_success, mut put_fail, mut get_success, mut get_fail, mut neg_ack) = (0, 0, 0, 0, 0);
+    let (mut put_insert, mut put_upsert, mut get_success, mut get_fail, mut neg_ack) = (0, 0, 0, 0, 0);
     let do_put_dist = Bernoulli::from_ratio(4, 10).unwrap();
     let start = Instant::now();
 
@@ -37,11 +34,11 @@ fn main() {
         if do_put_dist.sample(&mut thread_rng()) {
             // 40% chance to do a put
             let (b, neg_ack_incr) = put(thread_rng().gen_range(0, key_range),
-                                        String::from("A"), &mut streams, key_range);
+                                        2, &mut streams, key_range);
             neg_ack += neg_ack_incr;
             match b {
-                true => put_success += 1,
-                false => put_fail +=1,
+                true => put_insert += 1,
+                false => put_upsert +=1,
             }
         } else {
             // 60% chance to do a get
@@ -66,8 +63,8 @@ fn main() {
     println!();
     println!("{:<20}{:<20}{:<20}", "num_ops", "key_range", "time_ms");
     println!("{:<20}{:<20}{:<20}", num_ops, key_range, duration);
-    println!("{:<20}{:<20}{:<20}{:<20}", "put_success", "put_fail", "get_success", "get_fail");
-    println!("{:<20}{:<20}{:<20}{:<20}", put_success, put_fail, get_success, get_fail);
+    println!("{:<20}{:<20}{:<20}{:<20}", "put_insert", "put_upsert", "get_success", "get_fail");
+    println!("{:<20}{:<20}{:<20}{:<20}", put_insert, put_upsert, get_success, get_fail);
     println!("{:<20}{:<20}", "throughput (ops/ms)", "latency (ms/op)");
     println!("{:<20.10}{:<20.10}", num_ops as f64 / duration as f64, duration as f64 / num_ops as f64);
     println!("{:<20}", "neg_ack");
@@ -84,20 +81,11 @@ fn put(key: KeyType, value: ValueType, streams: &mut Vec<TcpStream>, key_range: 
     let mut retries = 0;
 
     loop {
-        let timer = Instant::now();
-        // println!("Client serializing {:?}", c);
-        let buffer = bincode::serialize(&c).unwrap();
-        stream_ref.write(buffer.as_slice()).expect("Unable to write Command");
-        // buffered_serialize_into(&mut *stream_ref, &c).expect("Unable to write Command");
-
-        // FIXME: This is some kind of weird reborrow
-        let cr = bincode::deserialize_from(&mut *stream_ref).unwrap();
-        // println!("Client got response after {} ms", timer.elapsed().as_millis());
-
+        let cr = send_recv_command(&mut *stream_ref, &c);
         match cr {
-            CommandResponse::PutAck(b) => break (b, retries),    // This returns
+            CommandResponse::PutAck(o) => break (o.is_none(), retries),    // This returns
             CommandResponse::NegAck => retries += 1,
-            _ => println!("Received unexpected response"),
+            _ => panic!("Received unexpected CR in put"),
         }
         // Exponential backoff
         thread::sleep(Duration::from_micros(thread_rng().gen_range(0, 2u32.pow(retries)) as u64));
@@ -105,29 +93,73 @@ fn put(key: KeyType, value: ValueType, streams: &mut Vec<TcpStream>, key_range: 
 }
 
 fn get(key: KeyType, streams: &mut Vec<TcpStream>, key_range: u32) -> (Option<ValueType>, u32) {
-    // Returns the result of the put, and the number of retries as a tuple.
-
     let c = Command::Get(key);
     let index: usize = ((key as f64 / key_range as f64) * streams.len() as f64) as usize;
     let stream_ref = streams.get_mut(index).unwrap();
     let mut retries = 0;
 
     loop {
-        let timer = Instant::now();
-        // println!("Client serializing {:?}", c);
-        let buffer = bincode::serialize(&c).unwrap();
-        stream_ref.write(buffer.as_slice()).expect("Unable to write Command");
-        // buffered_serialize_into(stream_ref, &c).expect("Unable to write Command");
-
-        let cr = bincode::deserialize_from(&mut *stream_ref).unwrap();
-        // println!("Client got response after {} ms", timer.elapsed().as_millis());
-
+        let cr = send_recv_command(&mut *stream_ref, &c);
         match cr {
             CommandResponse::GetAck(o) => break (o, retries),    // This returns
             CommandResponse::NegAck => retries += 1,
-            _ => println!("Received unexpected response"),
+            _ => panic!("Received unexpected CR in get"),
         }
         // Exponential backoff
         thread::sleep(Duration::from_micros(thread_rng().gen_range(0, 2u32.pow(retries)) as u64));
     }
+}
+
+/// Only returns the # retries, while a singular put will return whether it was an insert or upsert.
+fn put_2pc(records: Vec<(KeyType, ValueType)>, streams: &mut Vec<TcpStream>, key_range: u32, replication_degree: u32) -> u32 {
+    let mut retries = 0;
+    loop {
+        let mut received_voteno = false;
+        'request_loop: for (key, _value) in &records {
+            let c = Command::PutRequest(*key);  // FIXME: This will fail if using a non-copy key type
+            for replication_offset in 0..(replication_degree + 1) {
+                // Normalizes key between 0..1 (exclusive),
+                // then multiplies by streams.len() to get indicies from 0..streams.len (exclusive)
+                let index: usize = ((*key as f64 / key_range as f64) * streams.len() as f64) as usize;
+                let index = (index + replication_offset as usize) % streams.len();
+                let stream_ref = streams.get_mut(index).unwrap();
+
+                let cr = send_recv_command(&mut *stream_ref, &c);
+                match cr {
+                    CommandResponse::VoteYes => (),
+                    CommandResponse::VoteNo => {
+                        received_voteno = true;
+                        retries += 1;
+                        break 'request_loop;
+                    },
+                    _ => panic!("Received unexpected CR in put_2pc"),
+                }
+            }
+        }
+        if !received_voteno {
+            break;
+        }
+        thread::sleep(Duration::from_micros(thread_rng().gen_range(0, 2u32.pow(retries)) as u64));
+    }
+
+    // At this point, we've gotten all votes yes, and can do phase 2
+    for (key, value) in records {
+        let c = Command::PutCommit(key, value);
+        for replication_offset in 0..(replication_degree + 1) {
+            let index: usize = ((key as f64 / key_range as f64) * streams.len() as f64) as usize;
+            let index = (index + replication_offset as usize) % streams.len();
+            let stream_ref = streams.get_mut(index).unwrap();
+            buffered_serialize_into(&mut *stream_ref, &c).expect("Unable to write Command");
+            // We don't have any acks for this
+        }
+    }
+    retries
+}
+
+fn send_recv_command(stream_ref: &mut TcpStream, c: &Command, ) -> CommandResponse {
+    // let timer = Instant::now();
+    buffered_serialize_into(&mut *stream_ref, &c).expect("Unable to write Command");
+    let cr = bincode::deserialize_from(&mut *stream_ref).unwrap();
+    // println!("Client got response after {} ms", timer.elapsed().as_millis());
+    cr
 }

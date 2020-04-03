@@ -79,15 +79,19 @@ pub mod barrier {
 }
 
 pub mod parallel {
-    use std::sync::{RwLock, Mutex};
+    use std::sync::{Mutex, TryLockResult};
     use crate::parallel::LockCheck::{LockFail, Type};
     use crate::transport::{KeyType, ValueType};
 
-    // TODO: Make generic for real...
+    // enum Bucket<K, V> {
+    //     Data(Vec<(K, V)>),
+    //     Locked,
+    // }
+
     pub struct ConcurrentHashTable {
-        buckets: RwLock<Vec<Mutex<Vec<(KeyType, ValueType)>>>>,
-        num_buckets: usize,
-        key_range: u32,
+        pub buckets: Vec<Mutex<Vec<(KeyType, ValueType)>>>,
+        pub num_buckets: usize,
+        pub key_range: u32,
         num_servers: usize,
     }
 
@@ -101,26 +105,25 @@ pub mod parallel {
             assert!(num_buckets > 0 && key_range > 0 && num_servers > 0);
 
             // Abusing RW locks (kind of) in order to avoid unsafe code.
-            let buckets: RwLock<Vec<Mutex<Vec<(KeyType, ValueType)>>>>
-                = RwLock::new(Vec::with_capacity(num_buckets));
-            let mut buckets_lock = buckets.write().unwrap();
+            let mut buckets = Vec::with_capacity(num_buckets);
             for _ in 0..num_buckets {
-                buckets_lock.push(Mutex::new(Vec::new()));
+                buckets.push(Mutex::new(Vec::new()));
             }
-            drop(buckets_lock);
-            ConcurrentHashTable {
-                buckets,
-                num_buckets,
-                key_range,
-                num_servers
-            }
+            ConcurrentHashTable { buckets, num_buckets, key_range, num_servers }
+        }
+
+        /// Returns the Mutex<Vec> of where that key would be located, regardless if it exists.
+        /// This allows us to add it if necessary.
+        pub fn lock(&self, key: &KeyType) -> &Mutex<Vec<(KeyType,ValueType)>> {
+            let bucket_lock = self.buckets.get(self.compute_bucket(key)).unwrap();
+            // let bucket_lock = bucket_lock.try_lock();
+            unimplemented!()
         }
 
         // DIFFERENCES:
         // This clones the value type. Convenient for later.
         pub fn get(&self, key: &KeyType) -> LockCheck<Option<ValueType>> {
-            let buckets = self.buckets.read().unwrap();
-            let bucket_lock = buckets.get(self.compute_bucket(key)).unwrap();
+            let bucket_lock = self.buckets.get(self.compute_bucket(key)).unwrap();
             // TRY LOCK !
             let bucket_lock = bucket_lock.try_lock();
             match bucket_lock {
@@ -139,20 +142,17 @@ pub mod parallel {
         }
 
 
-        // DOES update keys to new values
+        /// DOES update keys to new values
         pub fn insert(&self, key: KeyType, value: ValueType) -> LockCheck<Option<ValueType>> {
-            let buckets = self.buckets.read().unwrap();
-            let bucket_lock = buckets.get(self.compute_bucket(&key)).unwrap();
-            // TRY LOCK !
+            let bucket_lock = self.buckets.get(self.compute_bucket(&key)).unwrap();
             let bucket_lock = bucket_lock.try_lock();
             match bucket_lock {
                 Err(_) => LockFail,
-                // FIXME: Does this work???
                 Ok(mut bucket) => {
                     let index = bucket.iter().position(|(k, _)| *k == key);
-                    if let Some(index) = index {
+                    if let Some(i) = index {
                         // The key already existed, update it.
-                        let pair = bucket.get_mut(index).unwrap();
+                        let pair = bucket.get_mut(i).unwrap();
                         // FIXME: This performance is gonna suck. Try doing something else.
                         // Look into entry and or_insert.
                         let prev_value = pair.1.clone();
@@ -167,9 +167,29 @@ pub mod parallel {
             }
         }
 
+        pub fn insert_if_absent(&self, key: KeyType, value: ValueType) -> LockCheck<bool> {
+            // true means inserted, false means not inserted (there was something already there)
+            let bucket_lock = self.buckets.get(self.compute_bucket(&key)).unwrap();
+            // TRY LOCK !
+            let bucket_lock = bucket_lock.try_lock();
+            match bucket_lock {
+                Err(_) => LockFail,
+                Ok(mut bucket) => {
+                    let res = bucket.iter().any(|(k, _)| *k == key);
+                    if res {
+                        // The key exists already
+                        Type(false)
+                    } else {
+                        // The key does not exist, append it to the bucket.
+                        bucket.push((key, value));
+                        Type(true)
+                    }
+                },
+            }
+        }
+
         pub fn contains_key(&self, key: &KeyType) -> LockCheck<bool> {
-            let buckets = self.buckets.read().unwrap();
-            let bucket_lock = buckets.get(self.compute_bucket(key)).unwrap();
+            let bucket_lock = self.buckets.get(self.compute_bucket(key)).unwrap();
             // TRY LOCK !
             let bucket_lock = bucket_lock.try_lock();
             match bucket_lock {
@@ -181,29 +201,7 @@ pub mod parallel {
             }
         }
 
-        pub fn insert_if_absent(&self, key: KeyType, value: ValueType) -> LockCheck<bool> {
-            // true means inserted, false means not inserted (there was something already there)
-            let buckets = self.buckets.read().unwrap();
-            let bucket_lock = buckets.get(self.compute_bucket(&key)).unwrap();
-            // TRY LOCK !
-            let bucket_lock = bucket_lock.try_lock();
-            match bucket_lock {
-                Err(_) => LockFail,
-                Ok(mut bucket) => {
-                    let res = bucket.iter().any(|(k, _)| *k == key);
-                    if res {
-                        // The key exists already
-                        Type(false)
-                    } else {
-                        // The key does not exist
-                        bucket.push((key, value));
-                        Type(true)
-                    }
-                },
-            }
-        }
-
-        fn compute_bucket(&self, key: &KeyType) -> usize {
+        pub fn compute_bucket(&self, key: &KeyType) -> usize {
             // We consistent hashing gives us contiguous ranges like [0, 1, 2, 3]
             *key as usize % self.num_buckets
         }
@@ -230,46 +228,62 @@ pub mod settings {
         Ok((client_ips, server_ips))
     }
 
-    pub fn parse_settings() -> Result<(Vec<String>, Vec<String>, u32, u32), ConfigError> {
+    pub fn parse_settings() -> Result<(Vec<String>, Vec<String>, u32, u32, u32, u32), ConfigError> {
         // Returns client_ips, server_ips, num_ops, key_range all as a tuple.
 
         let mut config = config::Config::default();
         // Add in server_settings.yaml
         config.merge(config::File::from(Path::new("./settings.yaml")))?;
-//    println!("{:#?}", config);
+        // println!("{:#?}", config);
         let (client_ips, server_ips) = parse_ips(&config)?;
 
         // Gather the other settings
         let num_ops = config.get_int("num_ops")?;
         let key_range = config.get_int("key_range")?;
+        let client_threads = config.get_int("client_threads")?;
+        let replication_degree = config.get_int("replication_degree")?;
 
-        Ok((client_ips, server_ips, num_ops as u32, key_range as u32))
+        // Check for configuration errors
+        // If the replication degree = # servers, then there will be an additional copy of the key
+        // On the original server. This will lead to deadlock.
+        assert!((replication_degree as usize) < server_ips.len(), "Replication degree too high for number of servers");
+
+        Ok((client_ips, server_ips, num_ops as u32, key_range as u32, client_threads as u32, replication_degree as u32))
     }
 }
 
 pub mod transport {
     use serde::{Serialize, Deserialize};
-    use std::net::TcpStream;
 
     // This entire class is only really client side.
     // Is there anything I can do server side ?
     // I'll need to handle a connection pool there also.
 
     pub type KeyType = u32;
-    pub type ValueType = String;    // TODO: Should be Any (Or equivalent)
+    pub type ValueType = u32;
 
     #[derive(Serialize, Deserialize, Debug)]
     pub enum Command {
         Put(KeyType, ValueType),
         Get(KeyType),
         Exit,
+        // These are used w/ replication degree > 0
+        PutRequest(KeyType),
+        PutCommit(KeyType, ValueType),
+        PutAbort,
     }
 
     #[derive(Serialize, Deserialize, Debug)]
     pub enum CommandResponse {
-        PutAck(bool),
+        PutAck(Option<ValueType>),  //Contains the previous value.
         GetAck(Option<ValueType>),
         NegAck,
+        // Used for 2PC
+        // FIXME: Should I send back the key so the client knows which one it's for?
+        // the single thread on the client will process the requests sequentially
+        // so TCP guarentees that the earlier one gets back first. (Does it actually guarentee this?)
+        VoteYes,
+        VoteNo,
     }
 
     ///Taken from here: https://docs.rs/bincode/1.2.1/src/bincode/lib.rs.html#85
