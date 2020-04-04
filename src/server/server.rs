@@ -2,17 +2,21 @@ use std::net::{TcpListener, TcpStream};
 use cse403_distributed_hash_table::barrier::{barrier};
 use cse403_distributed_hash_table::settings::{parse_settings};
 use std::sync::{Arc};
-use std::sync::atomic::{AtomicU32, Ordering};
+use std::sync::atomic::{Ordering, AtomicU64};
 use std::thread;
 use cse403_distributed_hash_table::parallel::{ConcurrentHashTable};
 use cse403_distributed_hash_table::transport::{Command, buffered_serialize_into};
 use cse403_distributed_hash_table::parallel::LockCheck;
 use cse403_distributed_hash_table::transport::CommandResponse;
-use serde::de::Deserialize;
 use std::time::{Duration, Instant};
+use serde::{Serialize, Deserialize};
+use std::fs::File;
+use std::io::Write;
+use cse403_distributed_hash_table::statistics::{ListenerMetrics, JsonMetrics};
+
 
 fn main() {
-    let (client_ips, server_ips, _num_ops, key_range, client_threads, replication_degree) = parse_settings()
+    let (client_ips, server_ips, num_ops, key_range, client_threads, replication_degree) = parse_settings()
         .expect("Unable to parse settings");
     let listener = TcpListener::bind(("0.0.0.0", 40480))
         .expect("Unable to bind listener");
@@ -23,47 +27,86 @@ fn main() {
     barrier(barrier_ips, &listener);
     // println!("Server passed barrier");
 
-    let threads_complete = Arc::new(AtomicU32::new(0));
+    let metrics = Arc::new(ListenerMetrics::new());
+
+    // TODO: Make num_buckets a configurable value
     let cht =
         Arc::new(ConcurrentHashTable::new(4096, key_range, num_servers));
     let mut listen_threads = Vec::new();
+    let mut server_ip = String::from("ERROR");
 
     // Accept exactly (num_clients * threads_per_client) connections
-    for i in 0..(num_clients * client_threads as usize) {
+    for _i in 0..(num_clients * client_threads as usize) {
         let (stream, addr) = listener.accept().expect("Couldn't accept connection");
         let cht_clone = cht.clone();
-        let counter_clone = threads_complete.clone();
+        let metrics_clone = metrics.clone();
+        server_ip = stream.local_addr().unwrap().ip().to_string(); // For statistics
 
         // println!("Spawning server thread: [listener {} | {}]", i, addr);
 
         listen_threads.push(thread::Builder::new()
-            .name(format!("[listener {} | {}]", i, addr))
-            .spawn(move || listen_stream(cht_clone, stream, counter_clone))
+            .name(format!("[{} | {}]", stream.local_addr().unwrap(), addr))
+            .spawn(move || listen_stream(cht_clone, stream, metrics_clone))
             .expect("Could't spawn thread"));
     }
 
-    // // I want some way to join only if ALL threads are done.
-    // // Take statistics, when the atomic int is done, print it.
-    // while threads_complete.load(Ordering::Relaxed) < listen_threads.len() as u32 {
-    //     // Take statistics, maybe just a counter of operations for now?
-    //     // Should i keep track of time as well?
-    //
-    //     thread::sleep(Duration::from_millis(50));
-    // }
+    // I want some way to join only if ALL threads are done.
+    // Take Statistics, when the atomic int is done, print it.
+    let timer = Instant::now();
+    let mut timer_delta = Instant::now();
+    let mut time_series_data = Vec::new();
+    let (mut put_commit_cum, mut put_abort_cum, mut get_cum, mut get_negack_cum) = (0,0,0,0);
+    while metrics.threads_complete.load(Ordering::Relaxed) < listen_threads.len() as u64 {
+        let time_elapsed_ms_cum = timer.elapsed().as_millis() as u64;
+        let time_elapsed_ms = timer_delta.elapsed().as_millis() as u64;
+        timer_delta = Instant::now(); // reset the timer
+        let time_elapsed_s = time_elapsed_ms as f64 / 1000 as f64;
+        let time_elapsed_s_cum = time_elapsed_ms_cum as f64 / 1000 as f64;
+        let put_commit = metrics.put_commit.swap(0, Ordering::Relaxed);
+        let put_abort = metrics.put_abort.swap(0, Ordering::Relaxed);
+        let get = metrics.get.swap(0, Ordering::Relaxed);
+        let get_negack = metrics.get_negack.swap(0, Ordering::Relaxed);
+        put_commit_cum += put_commit;
+        put_abort_cum += put_abort;
+        get_cum += get;
+        get_negack_cum += get_negack;
+        let jm = JsonMetrics { time_elapsed_ms, put_commit, put_abort, get, get_negack,
+            time_elapsed_ms_cum, put_commit_cum, put_abort_cum, get_cum, get_negack_cum, // Cumulative Fields
+            ops: put_commit + get, ops_cum: put_commit_cum + get_cum,
+            throughput: (put_commit + get) as f64 / (time_elapsed_ms as f64 / 1000 as f64),
+            throughput_cum: (put_commit_cum + get_cum) as f64 / (time_elapsed_ms_cum as f64 / 1000 as f64),
+            latency: (time_elapsed_ms as f64 / 1000 as f64) / (put_commit + get) as f64,
+            latency_cum: (time_elapsed_ms_cum as f64 / 1000 as f64) / (put_commit_cum + get_cum) as f64,
+            // Static stuff
+            server_ip: server_ip.clone(), num_ops, key_range, client_threads, replication_degree };
+        time_series_data.push(jm);
+        thread::sleep(Duration::from_millis(500));
+    }
     // Join on those threads, should work instantly b/c they all should be done.
-    // println!("Server done accepting connections, joining on listening threads");
     for jh in listen_threads {
         jh.join().unwrap();
     }
-    // Print statistics.
-    // println!("Server complete")
+    let duation_ms = timer.elapsed().as_millis() as u64;
+    // Print some cumulative Statistics for debugging
+    println!();
+    println!("CUMULATIVE STATISTICS");
+    println!("{:<20}{:<20}{:<16}", "num_ops", "key_range", "time_ms");
+    println!("{:<20}{:<20}{:<16}", num_ops, key_range, duation_ms);
+    println!("{:<20}{:<20}{:<16}{:<16}", "put_commit", "put_abort", "get", "get_negack");
+    println!("{:<20}{:<20}{:<16}{:<16}", put_commit_cum, put_abort_cum, get_cum, get_negack_cum);
+    println!("{:<20}{:<20}", "throughput (ops/s)", "latency (s/op)");
+    println!("{:<20.3}{:<20.3}", num_ops as f64 / (duation_ms as f64 / 1000 as f64), (duation_ms as f64 / 1000 as f64) / num_ops as f64);
+    println!();
+    // Write the time series statistics to a JSON file.
+    let time_series_data_json = serde_json::to_vec(&time_series_data).unwrap();
+    let mut file = File::create("time_series_data.json").unwrap();
+    file.write(time_series_data_json.as_slice()).unwrap();
 }
 
-fn listen_stream(cht: Arc<ConcurrentHashTable>, stream: TcpStream, counter: Arc<AtomicU32>) -> () {
+fn listen_stream(cht: Arc<ConcurrentHashTable>, stream: TcpStream, statistics: Arc<ListenerMetrics>) -> () {
     let mut buckets_locked = Vec::new();
     loop {
         let c = bincode::deserialize_from(&stream).unwrap();
-        // println!("{} Received: {:?}", thread::current().name().unwrap(), c);
         match c {
             Command::Put(key, value) => {
                 let hash_table_res = cht.insert(key, value);
@@ -71,38 +114,49 @@ fn listen_stream(cht: Arc<ConcurrentHashTable>, stream: TcpStream, counter: Arc<
                     LockCheck::LockFail => CommandResponse::NegAck,
                     LockCheck::Type(b) => CommandResponse::PutAck(b),
                 };
-                // println!("{} Response: {:?}", thread::current().name().unwrap(), resp);
+                // println!("{} {:?} - {:?}", thread::current().name().unwrap(), c, resp);
                 buffered_serialize_into(&stream, &resp).expect("Could not write Put result");
             },
             Command::Get(key) => {
                 let hash_table_res = cht.get(&key);
                 let resp = match hash_table_res {
-                    LockCheck::LockFail => CommandResponse::NegAck,
-                    LockCheck::Type(o) => CommandResponse::GetAck(o),
+                    LockCheck::LockFail => {
+                        statistics.get_negack.fetch_add(1, Ordering::Relaxed);
+                        CommandResponse::NegAck
+                    },
+                    LockCheck::Type(o) => {
+                        statistics.get.fetch_add(1, Ordering::Relaxed);
+                        CommandResponse::GetAck(o)
+                    },
                 };
-                // println!("{} Response: {:?}", thread::current().name().unwrap(), resp);
+                // println!("{} {:?} - {:?}", thread::current().name().unwrap(), c, resp);
                 buffered_serialize_into(&stream, &resp).expect("Could not write Get result");
             },
             Command::Exit => {
                 // Signals that we're done, and that we should collect the stream.
-                // Maybe increment an AtomicInt in the statistics thread which keeps track of the number of
+                // Maybe increment an AtomicInt in the Statistics thread which keeps track of the number of
                 // Threads which have terminated.
-                counter.fetch_add(1, Ordering::Relaxed); // Is this ordering OK?
+                statistics.threads_complete.fetch_add(1, Ordering::Relaxed); // Is this ordering OK?
                 break;
             },
             Command::PutRequest(key) => {
                 // get a real lock in the hash table.
                 let bucket_lock = cht.buckets.get(cht.compute_bucket(&key)).unwrap();
                 let bucket_lock = bucket_lock.try_lock();
-                match bucket_lock {
-                    Err(_) => buffered_serialize_into(&stream, &CommandResponse::VoteNo).unwrap(),
+                let resp = match bucket_lock {
+                    Err(_) => CommandResponse::VoteNo,
                     Ok(mutex_guard) => {
                         buckets_locked.push((key, mutex_guard));
-                        buffered_serialize_into(&stream, &CommandResponse::VoteYes).unwrap()
+                        CommandResponse::VoteYes
                     },
                 };
+                // println!("{} {:?} - {:?}", thread::current().name().unwrap(), c, resp);
+                buffered_serialize_into(&stream, &resp).unwrap();
             },
             Command::PutCommit(key, value) => {
+                statistics.put_commit.fetch_add(1, Ordering::Relaxed);
+                // println!("{} {:?}", thread::current().name().unwrap(), c);
+
                 // do the put operation with the locks we have acquired
                 let buckets_locked_index = buckets_locked.iter().position(|(k, _)| *k == key).unwrap();
                 let (_k, mut bucket) = buckets_locked.remove(buckets_locked_index);
@@ -117,9 +171,12 @@ fn listen_stream(cht: Arc<ConcurrentHashTable>, stream: TcpStream, counter: Arc<
                 }
             },
             Command::PutAbort => {
+                statistics.put_abort.fetch_add(1, Ordering::Relaxed);
+                // println!("{} {:?}", thread::current().name().unwrap(), c);
+
                 // Dump our entire buckets_locked. After all, we're only saving locks for one thread.
                 // It can only do one put / multiput operation at a time.
-                // All of our saved locks are pushed out of scope.
+                // If we're aborting, everything in our table is for the multiput.
                 buckets_locked.clear();
             }
         }

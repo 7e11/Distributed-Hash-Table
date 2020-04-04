@@ -248,6 +248,11 @@ pub mod settings {
         // On the original server. This will lead to deadlock.
         assert!((replication_degree as usize) < server_ips.len(), "Replication degree too high for number of servers");
 
+        // If the key range is too small, we won't be able to properly generate multiputs of size 3
+        // with all keys unique
+        assert!(key_range >= 3, "Key range not large enough, size 3 multiput cannot have all unique keys");
+
+
         Ok((client_ips, server_ips, num_ops as u32, key_range as u32, client_threads as u32, replication_degree as u32))
     }
 }
@@ -320,4 +325,59 @@ pub mod transport {
     // stream.read(&mut buffer[..]).unwrap();
     // let c = bincode::deserialize(&buffer[..]).unwrap();
 
+}
+
+pub mod statistics {
+    use serde::{Serialize, Deserialize};
+    use std::sync::atomic::{Ordering, AtomicU64};
+
+    #[derive(Serialize, Deserialize, Debug)]
+    pub struct ListenerMetrics {
+        pub threads_complete: AtomicU64,
+        pub put_commit: AtomicU64,
+        pub put_abort: AtomicU64,
+        pub get: AtomicU64,
+        pub get_negack: AtomicU64,
+    }
+
+    impl ListenerMetrics {
+        pub fn new() -> ListenerMetrics {
+            ListenerMetrics {
+                threads_complete: AtomicU64::new(0),
+                put_commit: AtomicU64::new(0),
+                put_abort: AtomicU64::new(0),
+                get: AtomicU64::new(0),
+                get_negack: AtomicU64::new(0),
+            }
+        }
+    }
+
+    #[derive(Serialize, Deserialize, Debug)]
+    pub struct JsonMetrics {
+        // Metric Fields
+        pub time_elapsed_ms: u64,
+        pub put_commit: u64,
+        pub put_abort: u64,
+        pub get: u64,
+        pub get_negack: u64,
+        // Cumulative Fields
+        pub time_elapsed_ms_cum: u64,
+        pub put_commit_cum: u64,
+        pub put_abort_cum: u64,
+        pub get_cum: u64,
+        pub get_negack_cum: u64,
+        // Calculated Fields
+        pub ops: u64,
+        pub ops_cum: u64,
+        pub throughput: f64,
+        pub throughput_cum: f64,
+        pub latency: f64,
+        pub latency_cum: f64,
+        // Static stuff for analysis later.
+        pub server_ip: String,
+        pub num_ops: u32,
+        pub key_range: u32,
+        pub client_threads: u32,
+        pub replication_degree: u32,
+    }
 }

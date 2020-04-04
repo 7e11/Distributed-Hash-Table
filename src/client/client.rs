@@ -21,24 +21,40 @@ fn main() {
     // println!("Client passed barrier");
 
     // Open a stream for each server.
-    let mut streams = server_ips.iter()
-        .map(|ip| { TcpStream::connect(ip).expect("Unable to connect"); })
-        .collect();
+    let mut streams: Vec<TcpStream> = server_ips.iter()
+        .map(|ip| {
+            let stream = TcpStream::connect(ip).expect("Unable to connect");
+            stream
+        }).collect();
 
 
     let (mut put_insert, mut put_upsert, mut get_success, mut get_fail, mut neg_ack) = (0, 0, 0, 0, 0);
     let do_put_dist = Bernoulli::from_ratio(4, 10).unwrap();
+    let put_type_dist = Bernoulli::from_ratio(1, 2).unwrap();
     let start = Instant::now();
 
     for _ in 0..num_ops {
         if do_put_dist.sample(&mut thread_rng()) {
-            // 40% chance to do a put
-            let (b, neg_ack_incr) = put(thread_rng().gen_range(0, key_range),
-                                        2, &mut streams, key_range);
-            neg_ack += neg_ack_incr;
-            match b {
-                true => put_insert += 1,
-                false => put_upsert +=1,
+            // 40% chance to do a put (single or multi)
+            if put_type_dist.sample(&mut thread_rng()) {
+                // 20% chance for a single put
+                // let (b, neg_ack_incr) = put(thread_rng().gen_range(0, key_range), 2, &mut streams, key_range);
+                let neg_ack_incr = put_2pc(vec![(thread_rng().gen_range(0, key_range), 2); 1],
+                                           &mut streams, key_range, replication_degree);
+                neg_ack += neg_ack_incr;
+            } else {
+                // 20% chance for a multiput (3 keys)
+                // FIXME: These 3 keys need to be unique, else we get deadlock.
+                let mut records: Vec<(KeyType, ValueType)> = Vec::new();
+                while records.len() < 3 {
+                    let key = thread_rng().gen_range(0, key_range);
+                    if !records.iter().any(|(k, v)| *k == key) {
+                        records.push((key, 3));
+                    }
+                }
+                let neg_ack_incr = put_2pc(records,
+                                           &mut streams, key_range, replication_degree);
+                neg_ack += neg_ack_incr;
             }
         } else {
             // 60% chance to do a get
@@ -60,16 +76,16 @@ fn main() {
 
     let duration = start.elapsed().as_millis();
 
-    println!();
-    println!("{:<20}{:<20}{:<20}", "num_ops", "key_range", "time_ms");
-    println!("{:<20}{:<20}{:<20}", num_ops, key_range, duration);
-    println!("{:<20}{:<20}{:<20}{:<20}", "put_insert", "put_upsert", "get_success", "get_fail");
-    println!("{:<20}{:<20}{:<20}{:<20}", put_insert, put_upsert, get_success, get_fail);
-    println!("{:<20}{:<20}", "throughput (ops/ms)", "latency (ms/op)");
-    println!("{:<20.10}{:<20.10}", num_ops as f64 / duration as f64, duration as f64 / num_ops as f64);
-    println!("{:<20}", "neg_ack");
-    println!("{:<20}", neg_ack);
-    println!();
+    // println!();
+    // println!("{:<20}{:<20}{:<20}", "num_ops", "key_range", "time_ms");
+    // println!("{:<20}{:<20}{:<20}", num_ops, key_range, duration);
+    // println!("{:<20}{:<20}{:<20}{:<20}", "put_insert", "put_upsert", "get_success", "get_fail");
+    // println!("{:<20}{:<20}{:<20}{:<20}", put_insert, put_upsert, get_success, get_fail);
+    // println!("{:<20}{:<20}", "throughput (ops/ms)", "latency (ms/op)");
+    // println!("{:<20.10}{:<20.10}", num_ops as f64 / duration as f64, duration as f64 / num_ops as f64);
+    // println!("{:<20}", "neg_ack");
+    // println!("{:<20}", neg_ack);
+    // println!();
 }
 
 fn put(key: KeyType, value: ValueType, streams: &mut Vec<TcpStream>, key_range: u32) -> (bool, u32) {
@@ -139,6 +155,20 @@ fn put_2pc(records: Vec<(KeyType, ValueType)>, streams: &mut Vec<TcpStream>, key
         if !received_voteno {
             break;
         }
+        // Send all the aborts, we got a no vote
+        // FIXME: If 2 keys are on the same server, this will send more aborts to that server than necessary
+        // Not really a critical problem though, so not worrying about it for now.
+        for (key, _value) in &records {
+            let c = Command::PutAbort;
+            for replication_offset in 0..(replication_degree + 1) {
+                let index: usize = ((*key as f64 / key_range as f64) * streams.len() as f64) as usize;
+                let index = (index + replication_offset as usize) % streams.len();
+                let stream_ref = streams.get_mut(index).unwrap();
+                buffered_serialize_into(&mut *stream_ref, &c).expect("Unable to write Command");
+                // We don't have any acks for this
+            }
+        }
+
         thread::sleep(Duration::from_micros(thread_rng().gen_range(0, 2u32.pow(retries)) as u64));
     }
 

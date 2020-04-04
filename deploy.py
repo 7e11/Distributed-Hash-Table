@@ -9,13 +9,16 @@
 
 
 # Perhaps there could also be a version which runs it with different combinations of key ranges and num ops.
+from typing import List, Dict
+
 from fabric import Connection, ThreadingGroup as Group
 from pathlib import Path, PurePath, PurePosixPath
 from threading import Thread
 from fabric.config import Config
 import os
-
-# FIXME: Temporary thing while I'm just working on one node.
+from plot import plot_time_series_cum
+from tempfile import TemporaryFile
+import json
 
 # user = 'evan'
 user = 'ec2-user'
@@ -28,11 +31,11 @@ user = 'ec2-user'
 
 # Changes on every restart
 nodes = [
-    '3.136.83.159',
-    '18.191.146.200',
-    '3.21.245.174',
-    '18.188.159.245',
-    '3.20.227.193',
+    '3.12.83.225',
+    '18.188.25.23',
+    '18.218.167.116',
+    '18.217.56.37',
+    '18.219.106.140',
 ]
 
 transfer_files = [
@@ -74,8 +77,10 @@ def update(group):
     group.run('/home/' + user + '/.cargo/bin/rustup update')
 
 def kill(group):
-    group.run("pkill -x server")
-    group.run("pkill -x client")
+    # pkill exit(1) if it tries to kill something not running.
+    # That will crash fabric, so the "|| true" will make sure the command always succeeds (?)
+    group.run("pkill -x server || true")
+    group.run("pkill -x client || true")
 
 def run_client(group):
     # Need to chain cd
@@ -90,9 +95,15 @@ def run_server(group, sockname='dtach'):
         conn.run('cd /home/' + user + '/dht && dtach -n `mktemp -u /tmp/%s.XXXX` %s' % (sockname, cmd))
         # background_run(conn, cmd)
 
-def background_run(connection, command):
-    command = 'nohup %s &> /dev/null &' % command
-    connection.run(command, pty=False)
+def collect_results(group: Group) -> List[dict]:
+    results: List[dict] = []
+    for conn in group:
+        with TemporaryFile() as file:
+            conn.get(remote='/home/' + user + '/dht/time_series_data.json', local=file)
+            file.seek(0)
+            str_response = file.read().decode('utf-8')
+            results.extend(json.loads(str_response))
+    return results
 
 if __name__ == '__main__':
     # One thread for managing the client ThreadedGroup, and another for the server ThreadedGroup
@@ -100,8 +111,8 @@ if __name__ == '__main__':
     # This doesn't parallelize, only allows for concurrency.
 
     client_group = configure_group(nodes)
-    # kill(client_group)
     # install(client_group)
+    kill(client_group)
     deploy(client_group)
 
     def server_operations():
@@ -114,3 +125,11 @@ if __name__ == '__main__':
 
     client_group.run('cd /home/' + user + '/dht && /home/' + user + '/.cargo/bin/cargo run --bin client')
     server_group_thread.join()
+
+    # Retrieve the JSON files from each of the servers. Can be done from the client group
+    results: List[dict] = collect_results(client_group)
+    with open('results.json', 'w') as outfile:
+        json.dump(results, outfile)
+    # print(results)
+    # Then run a plotting program.
+    # plot_time_series_cum(results)
