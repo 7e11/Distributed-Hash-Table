@@ -36,7 +36,7 @@ fn main() {
     let mut server_ip = String::from("ERROR");
 
     // Accept exactly (num_clients * threads_per_client) connections
-    for _i in 0..(num_clients * client_threads as usize) {
+    for i in 0..(num_clients * client_threads as usize) {
         let (stream, addr) = listener.accept().expect("Couldn't accept connection");
         let cht_clone = cht.clone();
         let metrics_clone = metrics.clone();
@@ -91,11 +91,11 @@ fn main() {
     println!();
     println!("CUMULATIVE STATISTICS");
     println!("{:<20}{:<20}{:<16}", "num_ops", "key_range", "time_ms");
-    println!("{:<20}{:<20}{:<16}", num_ops, key_range, duation_ms);
+    println!("{:<20}{:<20}{:<16}", (put_commit_cum + get_cum), key_range, duation_ms);
     println!("{:<20}{:<20}{:<16}{:<16}", "put_commit", "put_abort", "get", "get_negack");
     println!("{:<20}{:<20}{:<16}{:<16}", put_commit_cum, put_abort_cum, get_cum, get_negack_cum);
     println!("{:<20}{:<20}", "throughput (ops/s)", "latency (s/op)");
-    println!("{:<20.3}{:<20.3}", num_ops as f64 / (duation_ms as f64 / 1000 as f64), (duation_ms as f64 / 1000 as f64) / num_ops as f64);
+    println!("{:<20.3}{:<20.3}", (put_commit_cum + get_cum) as f64 / (duation_ms as f64 / 1000 as f64), (duation_ms as f64 / 1000 as f64) / (put_commit_cum + get_cum) as f64);
     println!();
     // Write the time series statistics to a JSON file.
     let time_series_data_json = serde_json::to_vec(&time_series_data).unwrap();

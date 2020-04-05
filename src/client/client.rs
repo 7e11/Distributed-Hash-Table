@@ -20,19 +20,34 @@ fn main() {
     barrier(barrier_ips, &listener);
     // println!("Client passed barrier");
 
+    // Start up the threads, then join on all of them.
+    // Each thread has its own collection of streams it manages.
+    let mut threads = Vec::new();
+    for i in 0..client_threads {
+        let server_ips_clone = server_ips.clone(); // This could be Arc instead.
+        threads.push(thread::Builder::new()
+            .name(format!("[client thread {}]", i))
+            .spawn(move || client_thread(server_ips_clone, num_ops, key_range, replication_degree))
+            .expect("Could't spawn client thread"));
+    }
+
+    // join on all the threads.
+    for jh in threads {
+        jh.join().unwrap();
+    }
+}
+
+fn client_thread(server_ips: Vec<String>, num_ops: u32, key_range: u32, replication_degree: u32) {
     // Open a stream for each server.
     let mut streams: Vec<TcpStream> = server_ips.iter()
         .map(|ip| {
             let stream = TcpStream::connect(ip).expect("Unable to connect");
             stream
         }).collect();
-
-
     let (mut put_insert, mut put_upsert, mut get_success, mut get_fail, mut neg_ack) = (0, 0, 0, 0, 0);
     let do_put_dist = Bernoulli::from_ratio(4, 10).unwrap();
     let put_type_dist = Bernoulli::from_ratio(1, 2).unwrap();
     let start = Instant::now();
-
     for _ in 0..num_ops {
         if do_put_dist.sample(&mut thread_rng()) {
             // 40% chance to do a put (single or multi)
@@ -48,7 +63,7 @@ fn main() {
                 let mut records: Vec<(KeyType, ValueType)> = Vec::new();
                 while records.len() < 3 {
                     let key = thread_rng().gen_range(0, key_range);
-                    if !records.iter().any(|(k, v)| *k == key) {
+                    if !records.iter().any(|(k, _v)| *k == key) {
                         records.push((key, 3));
                     }
                 }
@@ -59,7 +74,7 @@ fn main() {
         } else {
             // 60% chance to do a get
             let (o, neg_ack_incr) = get(thread_rng().gen_range(0, key_range),
-                                            &mut streams, key_range);
+                                        &mut streams, key_range);
             neg_ack += neg_ack_incr;
             match o {
                 Some(_) => get_success += 1,
@@ -67,15 +82,12 @@ fn main() {
             }
         }
     }
-
     // We've finished, send an Exit command to ALL streams to close the server side socket. EOF will crash the server.
     for stream in streams {
         // to_writer(stream, &Command::Exit).unwrap();
         buffered_serialize_into(stream, &Command::Exit).unwrap();
     }
-
-    let duration = start.elapsed().as_millis();
-
+    // let duration = start.elapsed().as_millis();
     // println!();
     // println!("{:<20}{:<20}{:<20}", "num_ops", "key_range", "time_ms");
     // println!("{:<20}{:<20}{:<20}", num_ops, key_range, duration);
@@ -88,6 +100,7 @@ fn main() {
     // println!();
 }
 
+#[allow(dead_code)]
 fn put(key: KeyType, value: ValueType, streams: &mut Vec<TcpStream>, key_range: u32) -> (bool, u32) {
     // Returns the result of the put, and the number of retries as a tuple.
 
@@ -173,6 +186,8 @@ fn put_2pc(records: Vec<(KeyType, ValueType)>, streams: &mut Vec<TcpStream>, key
     }
 
     // At this point, we've gotten all votes yes, and can do phase 2
+    // If 2 keys are on the same server, it will get putcommit for both keys.
+    // Not an error, but can make metrics look weird.
     for (key, value) in records {
         let c = Command::PutCommit(key, value);
         for replication_offset in 0..(replication_degree + 1) {

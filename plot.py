@@ -37,16 +37,22 @@ def plot_time_series_cum(data: List[dict]):
 
     df = pd.DataFrame(data)
     print(df.columns.values)
+
+    # https://stackoverflow.com/questions/13851535/delete-rows-from-a-pandas-dataframe-based-on-a-conditional-expression-involving
+    # Filter out replication_degree = 2, key_range = 10, num_ops = 100 entries
+    df = df[(df['replication_degree'] != 2) | (df['key_range'] != 10) | (df['num_ops'] != 100)]
+
     # tidy = pd.melt(df.reset_index(), id_vars=['time_elapsed_ms_cum'], value_vars=['put_commit', 'get', 'put_abort', 'get_negack'], var_name='cmd', value_name='count')
 
-    # # THROUGHPUT PLOTS
-    # tidy_throughput = pd.melt(df.reset_index(),
-    #                           id_vars=['time_elapsed_ms_cum', 'server_ip'],
-    #                           value_vars=['throughput', 'throughput_cum'],
-    #                           var_name='type',
-    #                           value_name='throughput_combined')
-    # # Point plot of throughput (I like this one the best)
-    # sns.relplot(x='time_elapsed_ms_cum', y='throughput_combined', hue='type', data=tidy_throughput)
+    # THROUGHPUT PLOTS
+    tidy_throughput = pd.melt(df.reset_index(),
+                              id_vars=['time_elapsed_ms_cum', 'server_ip', 'key_range', 'replication_degree'],
+                              value_vars=['throughput', 'throughput_cum'],
+                              var_name='type',
+                              value_name='throughput_combined')
+    # Point plot of throughput (I like this one the best)
+    sns.relplot(x='time_elapsed_ms_cum', y='throughput_combined', hue='type',
+                col='key_range', row='replication_degree', data=tidy_throughput)
     # # Line plot of throughput
     # sns.relplot(x='time_elapsed_ms_cum', y='throughput_combined', hue='type',
     #             kind='line', data=tidy_throughput)
@@ -54,14 +60,15 @@ def plot_time_series_cum(data: List[dict]):
     # sns.relplot(x='time_elapsed_ms_cum', y='throughput_combined', hue='type',
     #             units='server_ip', estimator=None, kind='line', data=tidy_throughput)
 
-    # # LATENCY PLOTS
-    # tidy_latency = pd.melt(df.reset_index(),
-    #                           id_vars=['time_elapsed_ms_cum', 'server_ip'],
-    #                           value_vars=['latency', 'latency_cum'],
-    #                           var_name='type',
-    #                           value_name='latency_combined')
-    # # Point plot of latency (I like this one the best)
-    # sns.relplot(x='time_elapsed_ms_cum', y='latency_combined', hue='type', data=tidy_latency)
+    # LATENCY PLOTS
+    tidy_latency = pd.melt(df.reset_index(),
+                              id_vars=['time_elapsed_ms_cum', 'server_ip', 'key_range', 'replication_degree'],
+                              value_vars=['latency', 'latency_cum'],
+                              var_name='type',
+                              value_name='latency_combined')
+    # Point plot of latency (I like this one the best)
+    sns.relplot(x='time_elapsed_ms_cum', y='latency_combined', hue='type',
+                col='key_range', row='replication_degree', data=tidy_latency)
     # # Line plot of latency
     # sns.relplot(x='time_elapsed_ms_cum', y='latency_combined', hue='type',
     #             kind='line', data=tidy_latency)
@@ -69,21 +76,27 @@ def plot_time_series_cum(data: List[dict]):
     # sns.relplot(x='time_elapsed_ms_cum', y='latency_combined', hue='type',
     #             units='server_ip', estimator=None, kind='line', data=tidy_latency)
 
-    # # OPERATION COUNT PLOTS
-    # tidy_count = pd.melt(df.reset_index(), id_vars=['time_elapsed_ms_cum', 'server_ip'], value_vars=['put_commit', 'get', 'put_abort', 'get_negack'], var_name='cmd', value_name='count')
-    # # Multiline plot, no estimator
-    # sns.relplot(x='time_elapsed_ms_cum', y='count', hue='cmd',
-    #             units='server_ip', estimator=None, kind='line', data=tidy_count)
-    # # lines with 95% CI estimator around mean.
-    # sns.relplot(x='time_elapsed_ms_cum', y='count', hue='cmd',
-    #             kind='line', data=tidy_count)
-
-
+    # OPERATION COUNT PLOTS
+    tidy_count = pd.melt(df.reset_index(),
+                         id_vars=['time_elapsed_ms_cum', 'server_ip', 'key_range', 'replication_degree'],
+                         value_vars=['put_commit', 'get', 'put_abort', 'get_negack'],
+                         var_name='cmd',
+                         value_name='count')
+    # Multiline plot, no estimator
+    sns.relplot(x='time_elapsed_ms_cum', y='count', hue='cmd',
+                units='server_ip', estimator=None, kind='line',
+                col='key_range', row='replication_degree', data=tidy_count)
+    # lines with 95% CI estimator around mean.
+    sns.relplot(x='time_elapsed_ms_cum', y='count', hue='cmd',
+                kind='line',
+                col='key_range', row='replication_degree', data=tidy_count)
 
     plt.show()
 
 
 if __name__ == '__main__':
-    with open('results.json', 'r') as json_file:
-        data = json.load(json_file)
-    plot_time_series_cum(data)
+    # Update our running thing.
+    with open('results_all.json', 'r') as json_file:
+        data_all = json.load(json_file)
+
+    plot_time_series_cum(data_all)
