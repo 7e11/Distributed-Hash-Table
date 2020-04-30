@@ -25,6 +25,9 @@ rand = "0.7.3"
 # Perhaps toiko in the future for asynchronous TCP ?
 # https://users.rust-lang.org/t/what-are-the-benefits-of-a-work-stealing-scheduler/24988
 
+# Bufstream
+bufstream = "0.1.4"
+
 [[bin]]
 name = "client"
 path = "src/client/client.rs"

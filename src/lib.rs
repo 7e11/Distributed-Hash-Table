@@ -6,6 +6,7 @@ pub mod barrier {
     use serde_json::to_writer;
     use crate::barrier::BarrierCommand::{AllReady, NotAllReady};
     use std::str::FromStr;
+    use crate::transport::buffered_serialize_into;
 
     #[derive(Serialize, Deserialize, Debug)]
     pub enum BarrierCommand {
@@ -21,7 +22,7 @@ pub mod barrier {
         //  - If someone does not acknowledge, just keep listening.
 
         // Bind the broadcast listener
-        println!("Listening for barrier on {:?}", listener);
+        // println!("Listening for barrier on {:?}", listener);
 
         // Spawn the broadcast thread.
         let handle = thread::spawn(move || {
@@ -32,9 +33,7 @@ pub mod barrier {
             match res_stream {
                 Err(e) => eprintln!("Couldn't accept barrier connection: {}", e),
                 Ok(stream) => {
-                    let mut de = serde_json::Deserializer::from_reader(stream);
-                    let bc = BarrierCommand::deserialize(&mut de)
-                        .expect("Could not deserialize barrier command.");
+                    let bc = bincode::deserialize_from(stream).unwrap();
                     match bc {
                         AllReady => break,
                         NotAllReady => (),
@@ -63,7 +62,7 @@ pub mod barrier {
                     // write NotAllReady to the ones that succeeded and return
                     for stream in open_streams {
                         // This will consume open_streams.
-                        to_writer(stream, &NotAllReady).expect("Failed to send NotAllReady");
+                        buffered_serialize_into(stream, &NotAllReady).unwrap();
                     }
                     return
                 },
@@ -73,13 +72,13 @@ pub mod barrier {
 
         // If everything worked, then write AllReady to all of them. This also consumes open_streams
         for stream in open_streams {
-            to_writer(stream, &AllReady).expect("Failed to send AllReady");
+            buffered_serialize_into(stream, &AllReady).unwrap();
         }
     }
 }
 
 pub mod parallel {
-    use std::sync::{Mutex, TryLockResult};
+    use std::sync::{Mutex};
     use crate::parallel::LockCheck::{LockFail, Type};
     use crate::transport::{KeyType, ValueType};
 
@@ -88,6 +87,7 @@ pub mod parallel {
     //     Locked,
     // }
 
+    #[allow(dead_code)]
     pub struct ConcurrentHashTable {
         pub buckets: Vec<Mutex<Vec<(KeyType, ValueType)>>>,
         pub num_buckets: usize,
@@ -110,14 +110,6 @@ pub mod parallel {
                 buckets.push(Mutex::new(Vec::new()));
             }
             ConcurrentHashTable { buckets, num_buckets, key_range, num_servers }
-        }
-
-        /// Returns the Mutex<Vec> of where that key would be located, regardless if it exists.
-        /// This allows us to add it if necessary.
-        pub fn lock(&self, key: &KeyType) -> &Mutex<Vec<(KeyType,ValueType)>> {
-            let bucket_lock = self.buckets.get(self.compute_bucket(key)).unwrap();
-            // let bucket_lock = bucket_lock.try_lock();
-            unimplemented!()
         }
 
         // DIFFERENCES:
@@ -267,6 +259,17 @@ pub mod transport {
     pub type KeyType = u32;
     pub type ValueType = u32;
 
+    #[derive(Serialize, Deserialize)]
+    pub enum Bench {
+        A,
+        B(u32),
+        C(u32, u32),
+        D([u32; 10]),   //This can be serialized successfully
+        // This cannot be serialized
+        // E([u32; 1_000]),
+        F(Vec<u32>),
+    }
+
     #[derive(Serialize, Deserialize, Debug)]
     pub enum Command {
         Put(KeyType, ValueType),
@@ -289,10 +292,13 @@ pub mod transport {
         // so TCP guarentees that the earlier one gets back first. (Does it actually guarentee this?)
         VoteYes,
         VoteNo,
+        PutCommitAck,
+        PutAbortAck,
     }
 
     ///Taken from here: https://docs.rs/bincode/1.2.1/src/bincode/lib.rs.html#85
-    /// Will need to make this return the writer back to the caller.
+    /// Will need to make this return the writer back to the caller?
+    /// Can use a reborrow like (&mut *stream) in order to avoid that.
     pub fn buffered_serialize_into< W, T: ?Sized>(mut writer: W, value: &T) -> std::io::Result<usize>
     where
         W: std::io::Write,
@@ -329,7 +335,7 @@ pub mod transport {
 
 pub mod statistics {
     use serde::{Serialize, Deserialize};
-    use std::sync::atomic::{Ordering, AtomicU64};
+    use std::sync::atomic::{AtomicU64};
 
     #[derive(Serialize, Deserialize, Debug)]
     pub struct ListenerMetrics {

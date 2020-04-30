@@ -5,14 +5,15 @@ use std::sync::{Arc};
 use std::sync::atomic::{Ordering, AtomicU64};
 use std::thread;
 use cse403_distributed_hash_table::parallel::{ConcurrentHashTable};
-use cse403_distributed_hash_table::transport::{Command, buffered_serialize_into};
+use cse403_distributed_hash_table::transport::{Command, buffered_serialize_into, Bench};
 use cse403_distributed_hash_table::parallel::LockCheck;
 use cse403_distributed_hash_table::transport::CommandResponse;
 use std::time::{Duration, Instant};
 use serde::{Serialize, Deserialize};
 use std::fs::File;
-use std::io::Write;
+use std::io::{Write, Read};
 use cse403_distributed_hash_table::statistics::{ListenerMetrics, JsonMetrics};
+use bufstream::BufStream;
 
 
 fn main() {
@@ -80,7 +81,7 @@ fn main() {
             // Static stuff
             server_ip: server_ip.clone(), num_ops, key_range, client_threads, replication_degree };
         time_series_data.push(jm);
-        thread::sleep(Duration::from_millis(500));
+        thread::sleep(Duration::from_millis(50));
     }
     // Join on those threads, should work instantly b/c they all should be done.
     for jh in listen_threads {
@@ -98,28 +99,42 @@ fn main() {
     println!("{:<20.3}{:<20.3}", (put_commit_cum + get_cum) as f64 / (duation_ms as f64 / 1000 as f64), (duation_ms as f64 / 1000 as f64) / (put_commit_cum + get_cum) as f64);
     println!();
     // Write the time series statistics to a JSON file.
-    let time_series_data_json = serde_json::to_vec(&time_series_data).unwrap();
-    let mut file = File::create("time_series_data.json").unwrap();
-    file.write(time_series_data_json.as_slice()).unwrap();
+    // let time_series_data_json = serde_json::to_vec(&time_series_data).unwrap();
+    // let mut file = File::create("time_series_data.json").unwrap();
+    // file.write(time_series_data_json.as_slice()).unwrap();
 }
 
-fn listen_stream(cht: Arc<ConcurrentHashTable>, stream: TcpStream, statistics: Arc<ListenerMetrics>) -> () {
+fn listen_stream(cht: Arc<ConcurrentHashTable>, mut stream: TcpStream, statistics: Arc<ListenerMetrics>) -> () {
     let mut buckets_locked = Vec::new();
+    // let mut stream = BufStream::new(stream)
     loop {
-        let c = bincode::deserialize_from(&stream).unwrap();
+        // let timer = Instant::now();
+        // let mut buffer = [0u8; 16];
+        // stream.read(&mut buffer).unwrap();
+        // // println!("{:?}", buffer);
+        // let c = bincode::deserialize(&buffer).unwrap();
+        // FIXME: Custom("invalid value: integer `1819033890`, expected variant index 0 <= i < 6")'
+        //  Not sure why this happens. It's 6C6C 4122 in Hex, looks structured
+        let c = bincode::deserialize_from(&stream)
+            .expect("Could not deserialize command");
+
+        // println!("cmd: {:?}", c);
+
         match c {
             Command::Put(key, value) => {
                 let hash_table_res = cht.insert(key, value);
-                let resp = match hash_table_res {
+                let cr = match hash_table_res {
                     LockCheck::LockFail => CommandResponse::NegAck,
                     LockCheck::Type(b) => CommandResponse::PutAck(b),
                 };
-                // println!("{} {:?} - {:?}", thread::current().name().unwrap(), c, resp);
-                buffered_serialize_into(&stream, &resp).expect("Could not write Put result");
+                // println!("SERVER {:20} -> {:20} in {} ms", format!("{:?}", c), format!("{:?}", cr), timer.elapsed().as_millis());
+                buffered_serialize_into(&stream, &cr).expect("Could not write Put result");
+                // bincode::serialize_into(&mut stream, &resp).unwrap();
+                // stream.flush();
             },
             Command::Get(key) => {
                 let hash_table_res = cht.get(&key);
-                let resp = match hash_table_res {
+                let cr = match hash_table_res {
                     LockCheck::LockFail => {
                         statistics.get_negack.fetch_add(1, Ordering::Relaxed);
                         CommandResponse::NegAck
@@ -129,8 +144,10 @@ fn listen_stream(cht: Arc<ConcurrentHashTable>, stream: TcpStream, statistics: A
                         CommandResponse::GetAck(o)
                     },
                 };
-                // println!("{} {:?} - {:?}", thread::current().name().unwrap(), c, resp);
-                buffered_serialize_into(&stream, &resp).expect("Could not write Get result");
+                // println!("SERVER {:20} -> {:20} in {} ms", format!("{:?}", c), format!("{:?}", cr), timer.elapsed().as_millis());
+                buffered_serialize_into(&stream, &cr).expect("Could not write Get result");
+                // bincode::serialize_into(&mut stream, &resp).unwrap();
+                // stream.flush();
             },
             Command::Exit => {
                 // Signals that we're done, and that we should collect the stream.
@@ -143,19 +160,20 @@ fn listen_stream(cht: Arc<ConcurrentHashTable>, stream: TcpStream, statistics: A
                 // get a real lock in the hash table.
                 let bucket_lock = cht.buckets.get(cht.compute_bucket(&key)).unwrap();
                 let bucket_lock = bucket_lock.try_lock();
-                let resp = match bucket_lock {
+                let cr = match bucket_lock {
                     Err(_) => CommandResponse::VoteNo,
                     Ok(mutex_guard) => {
                         buckets_locked.push((key, mutex_guard));
                         CommandResponse::VoteYes
                     },
                 };
-                // println!("{} {:?} - {:?}", thread::current().name().unwrap(), c, resp);
-                buffered_serialize_into(&stream, &resp).unwrap();
+                // println!("SERVER {:20} -> {:20} in {} ms", format!("{:?}", c), format!("{:?}", cr), timer.elapsed().as_millis());
+                buffered_serialize_into(&stream, &cr).unwrap();
+                // bincode::serialize_into(&mut stream, &resp).unwrap();
+                // stream.flush();
             },
             Command::PutCommit(key, value) => {
                 statistics.put_commit.fetch_add(1, Ordering::Relaxed);
-                // println!("{} {:?}", thread::current().name().unwrap(), c);
 
                 // do the put operation with the locks we have acquired
                 let buckets_locked_index = buckets_locked.iter().position(|(k, _)| *k == key).unwrap();
@@ -169,15 +187,20 @@ fn listen_stream(cht: Arc<ConcurrentHashTable>, stream: TcpStream, statistics: A
                     // The key doesn't exist yet
                     bucket.push((key, value));
                 }
+                //Send back some random response
+                buffered_serialize_into(&stream, &CommandResponse::PutCommitAck).unwrap();
             },
             Command::PutAbort => {
                 statistics.put_abort.fetch_add(1, Ordering::Relaxed);
-                // println!("{} {:?}", thread::current().name().unwrap(), c);
+
 
                 // Dump our entire buckets_locked. After all, we're only saving locks for one thread.
                 // It can only do one put / multiput operation at a time.
                 // If we're aborting, everything in our table is for the multiput.
                 buckets_locked.clear();
+
+                //Send back some random response
+                buffered_serialize_into(&stream, &CommandResponse::PutAbortAck).unwrap();
             }
         }
     }

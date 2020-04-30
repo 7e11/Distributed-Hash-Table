@@ -31,11 +31,12 @@ user = 'ec2-user'
 
 # Changes on every restart
 nodes = [
-    '52.14.247.51',
-    '3.15.40.83',
-    '18.220.208.203',
-    '52.15.189.99',
-    '18.191.158.65',
+    '3.23.94.163',
+    '18.190.24.180',
+    '18.222.210.198',
+    '3.21.52.39',
+
+    # '18.191.158.65',
 ]
 
 transfer_files = [
@@ -126,21 +127,16 @@ if __name__ == '__main__':
     client_group.run('cd /home/' + user + '/dht && /home/' + user + '/.cargo/bin/cargo run --bin client')
     server_group_thread.join()
 
-    print('Collecting Results')
-
-    # Retrieve the JSON files from each of the servers. Can be done from the client group
-    results: List[dict] = collect_results(client_group)
-    # Append these results to our data store
-
-    with open('results_all.json', 'r') as json_file:
-        data_all = json.load(json_file)
-
-    data_all.extend(results)
-
-    with open('results_all.json', 'w') as json_file:
-        json.dump(data_all, json_file)
-        # json.dump(results, json_file)
-
-    # print(results)
-    # Then run a plotting program.
-    # plot_time_series_cum(results)
+    # print('Collecting Results')
+    # # Retrieve the JSON files from each of the servers. Can be done from the client group
+    # results: List[dict] = collect_results(client_group)
+    # # Append these results to our data store
+    #
+    # with open('results_all.json', 'r') as json_file:
+    #     data_all = json.load(json_file)
+    #
+    # data_all.extend(results)
+    #
+    # with open('results_all.json', 'w') as json_file:
+    #     json.dump(data_all, json_file)
+    #     # json.dump(results, json_file)
