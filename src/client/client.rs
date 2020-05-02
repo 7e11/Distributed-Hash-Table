@@ -7,10 +7,9 @@ use cse403_distributed_hash_table::settings::{parse_settings};
 use cse403_distributed_hash_table::barrier::{barrier, BarrierCommand};
 use cse403_distributed_hash_table::transport::{KeyType, ValueType, Command, CommandResponse, buffered_serialize_into, Bench};
 use serde::de::Deserialize;
+use std::collections::HashMap;
 
 fn main() {
-    // debug();
-    // return;
     let (client_ips, server_ips, num_ops, key_range, client_threads, replication_degree) = parse_settings()
         .expect("Unable to parse settings");
     let listener = TcpListener::bind(("0.0.0.0", 40481))
@@ -63,7 +62,7 @@ fn client_thread(server_ips: Vec<String>, num_ops: u32, key_range: u32, replicat
             } else {
                 // 20% chance for a multiput (3 keys)
                 let timer= Instant::now();
-                // FIXME: These 3 keys need to be unique, else we get deadlock.
+                // FIXME: These 3 keys need to be unique, otherwise it doesn't make sense.
                 let mut records: Vec<(KeyType, ValueType)> = Vec::new();
                 while records.len() < 3 {
                     let key = thread_rng().gen_range(0, key_range);
@@ -152,91 +151,73 @@ fn get(key: KeyType, streams: &mut Vec<TcpStream>, key_range: u32, timer: Instan
 
 /// Only returns the # retries, while a singular put will return whether it was an insert or upsert.
 fn put_2pc(records: Vec<(KeyType, ValueType)>, streams: &mut Vec<TcpStream>, key_range: u32, replication_degree: u32, timer: Instant) -> u32 {
-    let timer_request = Instant::now();
+    // Creating bundles so we don't need to send more messages than necessary
+    let mut bundles = HashMap::new();
+    let mut key_bundles = HashMap::new();
+    for (k, v) in records {
+        for replication_offset in 0..(replication_degree + 1) {
+            let node_index = ((k as f64 / key_range as f64) * streams.len() as f64) as usize;
+            let node_index = (node_index + replication_offset as usize) % streams.len();
+            // Use Entry API for default vec insertion: https://stackoverflow.com/a/28512504/3990826
+            let bundle = bundles.entry(node_index).or_insert(Vec::new());
+            bundle.push((k, v));
+            let key_bundle = key_bundles.entry(node_index).or_insert(Vec::new());
+            key_bundle.push(k);
+        }
+    }
+
+    // Constructing the commands
+    let request_commands: Vec<(usize, Command)> = key_bundles.into_iter().map(|(node_index, key_bundle)| {
+        (node_index, Command::PutRequest(key_bundle))
+    }).collect();
+    let commit_commands: Vec<(usize, Command)> = bundles.into_iter().map(|(node_index, bundle)| {
+        (node_index, Command::PutCommit(bundle))
+    }).collect();
+
+    // phase1 requests
     let mut retries = 0;
     loop {
-        let mut received_voteno = false;
-        'request_loop: for (key, _value) in &records {
-            let c = Command::PutRequest(*key);  // FIXME: This will fail if using a non-copy key type
-            for replication_offset in 0..(replication_degree + 1) {
-                // Normalizes key between 0..1 (exclusive),
-                // then multiplies by streams.len() to get indicies from 0..streams.len (exclusive)
-                let index: usize = ((*key as f64 / key_range as f64) * streams.len() as f64) as usize;
-                let index = (index + replication_offset as usize) % streams.len();
-                let stream_ref = streams.get_mut(index).unwrap();
-                // println!("CLIENT {:10} PUT send_recv START", timer.elapsed().as_millis());
-                let cr = send_recv_command(&mut *stream_ref, &c);
-                // println!("CLIENT {:10} PUT send_recv END", timer.elapsed().as_millis());
-                match cr {
-                    CommandResponse::VoteYes => (),
-                    CommandResponse::VoteNo => {
-                        received_voteno = true;
-                        retries += 1;
-                        break 'request_loop;
-                    },
-                    _ => panic!("Received unexpected CR in put_2pc"),
-                }
-            }
-        }
-        if !received_voteno {
+        let phase1_success = put_2pc_phase1(&mut *streams, &request_commands);
+        if phase1_success {
             break;
         }
-        // Send all the aborts, we got a no vote
-        // FIXME: If 2 keys are on the same server, this will send more aborts to that server than necessary
-        // Not really a critical problem though, so not worrying about it for now.
-        for (key, _value) in &records {
-            let c = Command::PutAbort;
-            for replication_offset in 0..(replication_degree + 1) {
-                let index: usize = ((*key as f64 / key_range as f64) * streams.len() as f64) as usize;
-                let index = (index + replication_offset as usize) % streams.len();
-                let stream_ref = streams.get_mut(index).unwrap();
-                // bincode::serialize_into(&mut *stream_ref, &c).expect("Unable to write command");
-                send_recv_command(&mut *stream_ref, &c);
-            }
+        // Send the aborts (one per relevant node), we got a no vote
+        for (node_index, _) in &request_commands {
+            let stream_ref = streams.get_mut(*node_index).unwrap();
+            send_recv_command(&mut *stream_ref, &Command::PutAbort);
         }
-        // println!("CLIENT 2PC REQUEST PHASE RESTARTING");
+        // println!("CLIENT 2PC REQUEST PHASE RESTARTING {}, RECORDS: {:?}", retries, records);
         thread::sleep(Duration::from_micros(thread_rng().gen_range(0, 2u32.pow(retries)) as u64));
+        retries += 1;
     }
-
-    // println!("CLIENT 2PC REQUEST PHASE in {} ms", timer_request.elapsed().as_millis());
-    let timer_commit = Instant::now();
 
     // At this point, we've gotten all votes yes, and can do phase 2
-    // If 2 keys are on the same server, it will get putcommit for both keys.
-    // Not an error, but can make metrics look weird.
-    for (key, value) in records {
-        let c = Command::PutCommit(key, value);
-        for replication_offset in 0..(replication_degree + 1) {
-            let index: usize = ((key as f64 / key_range as f64) * streams.len() as f64) as usize;
-            let index = (index + replication_offset as usize) % streams.len();
-            let stream_ref = streams.get_mut(index).unwrap();
-            // bincode::serialize_into(&mut *stream_ref, &c).expect("Unable to write command");
-            // println!("CLIENT {:10} PUT ser_into START", timer.elapsed().as_millis());
-            //FIXME: Removing the following line resolves the strange 40ms delay.
-            // Why does it happen? Let's try replacing it with a read+write
-            // buffered_serialize_into(&mut *stream_ref, &c).expect("Unable to write Command");
-            send_recv_command(&mut *stream_ref, &c);
-            // println!("CLIENT {:10} PUT ser_into END", timer.elapsed().as_millis());
-            // We don't have any acks for this
-        }
+    for (node_index, commit_command) in &commit_commands {
+        let stream_ref = streams.get_mut(*node_index).unwrap();
+        send_recv_command(&mut *stream_ref, &commit_command);
     }
-    // println!("CLIENT 2PC COMMIT PHASE in {} ms", timer_commit.elapsed().as_millis());
-    // println!("CLIENT 2PC TOTAL in {} ms", timer_request.elapsed().as_millis());
     retries
 }
 
-fn send_recv_command(stream_ref: &mut TcpStream, c: &Command, ) -> CommandResponse {
+fn put_2pc_phase1(streams: &mut Vec<TcpStream>, request_commands: &Vec<(usize, Command)>) -> bool {
+    for (node_index, c) in request_commands {
+        let stream_ref = streams.get_mut(*node_index).unwrap();
+        let cr = send_recv_command(&mut *stream_ref, c);
+        match cr {
+            CommandResponse::VoteYes => (),
+            CommandResponse::VoteNo => return false,
+            _ => panic!("Received unexpected CR in put_2pc_phase1"),
+        }
+    }
+    true
+}
+
+
+fn send_recv_command(stream_ref: &mut TcpStream, c: &Command) -> CommandResponse {
     let timer = Instant::now();
     // bincode::serialize_into(&mut *stream_ref, &c).expect("Unable to write command");
     buffered_serialize_into(&mut *stream_ref, &c).expect("Unable to write Command");
     let cr = bincode::deserialize_from(&mut *stream_ref).unwrap();
     // println!("CLIENT {:20} -> {:20} in {} ms", format!("{:?}", c), format!("{:?}", cr), timer.elapsed().as_millis());
     cr
-}
-
-fn debug() {
-    println!("AllReady: {:?}", bincode::serialize(&BarrierCommand::AllReady).unwrap());
-    println!("NotAllReady: {:?}", bincode::serialize(&BarrierCommand::NotAllReady).unwrap());
-    println!("PutRequest: {:?}", bincode::serialize(&Command::PutRequest(99)).unwrap());
-    println!("Get: {:?}", bincode::serialize(&Command::Get(99)).unwrap());
 }

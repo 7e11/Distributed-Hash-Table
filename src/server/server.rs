@@ -13,7 +13,6 @@ use serde::{Serialize, Deserialize};
 use std::fs::File;
 use std::io::{Write, Read};
 use cse403_distributed_hash_table::statistics::{ListenerMetrics, JsonMetrics};
-use bufstream::BufStream;
 
 
 fn main() {
@@ -106,20 +105,10 @@ fn main() {
 
 fn listen_stream(cht: Arc<ConcurrentHashTable>, mut stream: TcpStream, statistics: Arc<ListenerMetrics>) -> () {
     let mut buckets_locked = Vec::new();
-    // let mut stream = BufStream::new(stream)
     loop {
-        // let timer = Instant::now();
-        // let mut buffer = [0u8; 16];
-        // stream.read(&mut buffer).unwrap();
-        // // println!("{:?}", buffer);
-        // let c = bincode::deserialize(&buffer).unwrap();
-        // FIXME: Custom("invalid value: integer `1819033890`, expected variant index 0 <= i < 6")'
-        //  Not sure why this happens. It's 6C6C 4122 in Hex, looks structured
         let c = bincode::deserialize_from(&stream)
             .expect("Could not deserialize command");
-
         // println!("cmd: {:?}", c);
-
         match c {
             Command::Put(key, value) => {
                 let hash_table_res = cht.insert(key, value);
@@ -129,10 +118,9 @@ fn listen_stream(cht: Arc<ConcurrentHashTable>, mut stream: TcpStream, statistic
                 };
                 // println!("SERVER {:20} -> {:20} in {} ms", format!("{:?}", c), format!("{:?}", cr), timer.elapsed().as_millis());
                 buffered_serialize_into(&stream, &cr).expect("Could not write Put result");
-                // bincode::serialize_into(&mut stream, &resp).unwrap();
-                // stream.flush();
             },
             Command::Get(key) => {
+                assert!(buckets_locked.is_empty(), "Residual lock detected");
                 let hash_table_res = cht.get(&key);
                 let cr = match hash_table_res {
                     LockCheck::LockFail => {
@@ -146,8 +134,6 @@ fn listen_stream(cht: Arc<ConcurrentHashTable>, mut stream: TcpStream, statistic
                 };
                 // println!("SERVER {:20} -> {:20} in {} ms", format!("{:?}", c), format!("{:?}", cr), timer.elapsed().as_millis());
                 buffered_serialize_into(&stream, &cr).expect("Could not write Get result");
-                // bincode::serialize_into(&mut stream, &resp).unwrap();
-                // stream.flush();
             },
             Command::Exit => {
                 // Signals that we're done, and that we should collect the stream.
@@ -156,49 +142,67 @@ fn listen_stream(cht: Arc<ConcurrentHashTable>, mut stream: TcpStream, statistic
                 statistics.threads_complete.fetch_add(1, Ordering::Relaxed); // Is this ordering OK?
                 break;
             },
-            Command::PutRequest(key) => {
-                // get a real lock in the hash table.
-                let bucket_lock = cht.buckets.get(cht.compute_bucket(&key)).unwrap();
-                let bucket_lock = bucket_lock.try_lock();
-                let cr = match bucket_lock {
-                    Err(_) => CommandResponse::VoteNo,
-                    Ok(mutex_guard) => {
-                        buckets_locked.push((key, mutex_guard));
-                        CommandResponse::VoteYes
-                    },
-                };
+            Command::PutRequest(keys) => {
+                assert!(buckets_locked.is_empty(), "Residual lock detected");
+                // I wonder if there's a better way to structure this.
+                let mut cr = CommandResponse::VoteYes;
+                for key in keys {
+                    // If we can lock ALL of the keys, vote yes
+                    let bucket_index = cht.compute_bucket(&key);
+                    if !buckets_locked.iter().any(|(bi, _)| *bi == bucket_index) {
+                        // If we don't already have the bucket, get it from the hash table.
+                        let bucket_lock = cht.buckets.get(bucket_index).unwrap();
+                        let bucket_lock = bucket_lock.try_lock();
+                        let cr = match bucket_lock {
+                            Err(_) => {
+                                cr = CommandResponse::VoteNo;
+                                break;
+                            },
+                            Ok(mutex_guard) => {
+                                buckets_locked.push((bucket_index, mutex_guard));
+                            },
+                        };
+                    }
+                }
                 // println!("SERVER {:20} -> {:20} in {} ms", format!("{:?}", c), format!("{:?}", cr), timer.elapsed().as_millis());
                 buffered_serialize_into(&stream, &cr).unwrap();
-                // bincode::serialize_into(&mut stream, &resp).unwrap();
-                // stream.flush();
             },
-            Command::PutCommit(key, value) => {
+            Command::PutCommit(bundle) => {
                 statistics.put_commit.fetch_add(1, Ordering::Relaxed);
 
-                // do the put operation with the locks we have acquired
-                let buckets_locked_index = buckets_locked.iter().position(|(k, _)| *k == key).unwrap();
-                let (_k, mut bucket) = buckets_locked.remove(buckets_locked_index);
-                let index = bucket.iter().position(|(k, _)| *k == key);
-                if let Some(i) = index {
-                    // The key exists, update it.
-                    let pair = bucket.get_mut(i).unwrap();
-                    pair.1 = value;
-                } else {
-                    // The key doesn't exist yet
-                    bucket.push((key, value));
+                for (key, value) in bundle {
+                    let bucket_index = cht.compute_bucket(&key);
+
+                    // do the put operation with the locks we have acquired, This is necessary to do the remove and gain ownership
+                    let buckets_locked_index = buckets_locked.iter().position(|(bi, _)| *bi == bucket_index).unwrap();
+                    let (bi, mut bucket) = buckets_locked.remove(buckets_locked_index);
+                    let index = bucket.iter().position(|(k, _)| *k == key);
+                    if let Some(i) = index {
+                        // The key exists, update it.
+                        let pair = bucket.get_mut(i).unwrap();
+                        pair.1 = value;
+                    } else {
+                        // The key doesn't exist yet
+                        bucket.push((key, value));
+                    }
+                    // give the bucket back to the manager
+                    buckets_locked.push((bi, bucket));
                 }
-                //Send back some random response
+
+                // Get rid of our locks at the end.
+                buckets_locked.clear();
+                // println!("SERVER {:20} -> {:20} in {} ms", format!("{:?}", c), format!("{:?}", CommandResponse::PutCommitAck), timer.elapsed().as_millis());
                 buffered_serialize_into(&stream, &CommandResponse::PutCommitAck).unwrap();
             },
             Command::PutAbort => {
                 statistics.put_abort.fetch_add(1, Ordering::Relaxed);
-
 
                 // Dump our entire buckets_locked. After all, we're only saving locks for one thread.
                 // It can only do one put / multiput operation at a time.
                 // If we're aborting, everything in our table is for the multiput.
                 buckets_locked.clear();
 
+                // println!("SERVER {:20} -> {:20} in {} ms", format!("{:?}", c), format!("{:?}", CommandResponse::PutAbortAck), timer.elapsed().as_millis());
                 //Send back some random response
                 buffered_serialize_into(&stream, &CommandResponse::PutAbortAck).unwrap();
             }

@@ -251,6 +251,7 @@ pub mod settings {
 
 pub mod transport {
     use serde::{Serialize, Deserialize};
+    use serde_json::Value;
 
     // This entire class is only really client side.
     // Is there anything I can do server side ?
@@ -272,12 +273,11 @@ pub mod transport {
 
     #[derive(Serialize, Deserialize, Debug)]
     pub enum Command {
-        Put(KeyType, ValueType),
+        Put(KeyType, ValueType),   // no longer used
         Get(KeyType),
         Exit,
-        // These are used w/ replication degree > 0
-        PutRequest(KeyType),
-        PutCommit(KeyType, ValueType),
+        PutRequest(Vec<KeyType>),
+        PutCommit(Vec<(KeyType, ValueType)>),
         PutAbort,
     }
 
@@ -286,10 +286,6 @@ pub mod transport {
         PutAck(Option<ValueType>),  //Contains the previous value.
         GetAck(Option<ValueType>),
         NegAck,
-        // Used for 2PC
-        // FIXME: Should I send back the key so the client knows which one it's for?
-        // the single thread on the client will process the requests sequentially
-        // so TCP guarentees that the earlier one gets back first. (Does it actually guarentee this?)
         VoteYes,
         VoteNo,
         PutCommitAck,
