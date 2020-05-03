@@ -15,7 +15,7 @@ Latency
 ![](assignment_3/latency3.png)
 
 ### Assignment 2
-I converted the DHT into a replicated hash table with a configurable replication degree. Added 2 Phase Commit for put operations.
+I converted the DHT into a replicated hash table with a configurable replication degree. Added 2 Phase Commit for put operations. Hash table can now be quickly deployed to AWS using the python library Fabric. This made it much easier to gather data for benchmarks.
 
 
 Throughput (See raw PNG for zoom)
