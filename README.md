@@ -1,6 +1,5 @@
 # Distributed-Hash-Table
-CSE 403: Advanced Operating Systems
-
+This is a distributed and replicated key value store built in rust for a graduate class I took in Spring 2020 - CSE 403 Advanced Operating Systems.
 
 I didn't add much documentation for the assignment 1 charts, as they were made in excel, 
 but I'll link the assignment 2 charts here for posterity.
